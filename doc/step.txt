@@ -1,0 +1,201 @@
+🔥 โปรเจค: AI ทำนายผลการแข่งขัน Valorant
+🎯 เป้าหมายโมเดล
+
+ทำนาย:
+
+ทีมไหนชนะ (% ความน่าจะเป็น)
+
+รอบปืนพก (Pistol Round) ใครชนะ
+
+สกอร์ครึ่งแรก (เช่น 7-5)
+
+สกอร์รวม (2-0 หรือ 2-1)
+
+📊 1️⃣ Dataset ที่ต้องหา (ต้องมีอย่างน้อย 2 ชุด)
+
+ตามโจทย์อาจารย์ต้องมี 2 Dataset และต้อง “ไม่สมบูรณ์” ด้วย
+
+Dataset 1: Match-level stats
+
+แหล่งข้อมูล:
+
+VLR.gg
+
+Liquipedia
+
+Kaggle (ถ้ามี dataset valorant esports)
+
+Feature ตัวอย่าง:
+
+Team A rating
+
+Team B rating
+
+Map
+
+Win rate บน map นั้น
+
+Pistol round win rate
+
+First kill rate
+
+Headshot %
+
+Economy rating
+
+Patch version
+
+Tournament tier
+
+Target:
+
+Winner (0/1)
+
+Score (2-0 / 2-1)
+
+Dataset 2: Round-level stats
+
+Feature:
+
+Attack/Defense side
+
+Economy difference
+
+Opening duel win
+
+Spike plant
+
+Agent composition
+
+Ult economy
+
+Target:
+
+Pistol winner
+
+Half score
+
+🧠 2️⃣ โมเดลที่ต้องทำ (ตามไฟล์โปรเจค)
+
+จากไฟล์ข้อกำหนด 
+
+Project IS 2568
+
+
+มึงต้องทำ:
+
+🔹 Model 1: Ensemble (อย่างน้อย 3 โมเดล)
+
+ตัวอย่าง:
+
+Random Forest
+
+XGBoost
+
+Logistic Regression
+
+แล้วทำ:
+
+Voting Classifier
+หรือ
+
+Stacking Ensemble
+
+นี่คือส่วน Machine Learning
+
+🔹 Model 2: Neural Network
+
+ทำแบบ:
+
+Input layer → Dense → Dropout → Dense → Output
+
+ใช้ ReLU + Sigmoid/Softmax
+
+หรือ LSTM ถ้าทำ sequence match
+
+ถ้าจะให้โหด:
+
+ทำ Multi-output model
+
+output1: match winner
+
+output2: score type
+
+output3: pistol round
+
+🌐 3️⃣ Web Application (Streamlit ง่ายสุด)
+
+ตามโจทย์ต้องมี 4 หน้า
+
+หน้า 1:
+
+อธิบาย Machine Learning model
+
+Data preprocessing
+
+Feature engineering
+
+Theory ของ ensemble
+
+หน้า 2:
+
+อธิบาย Neural Network
+
+Architecture diagram
+
+Loss function
+
+Training process
+
+หน้า 3:
+
+ทดสอบ ML model
+
+กรอกข้อมูลทีม
+
+แสดง % ชนะ
+
+หน้า 4:
+
+ทดสอบ Neural Network
+
+แสดง score prediction
+
+แสดง 2-0 / 2-1 probability
+
+Deploy ไป:
+
+Streamlit Community Cloud (ง่ายสุด)
+
+🧨 ทำยังไงให้โปรเจคนี้ดูเทพ
+🔥 เพิ่ม Feature Engineering
+
+เช่น:
+
+Momentum score (ชนะติดกันกี่แมตช์)
+
+Map-specific adjusted rating
+
+Patch-adjusted performance
+
+🔥 เพิ่ม Visualization
+
+Win probability graph
+
+Confusion matrix
+
+ROC curve
+
+Feature importance
+
+🧠 Model Problem Framing
+
+มึงจะได้หลาย problem ในโปรเจคเดียว:
+
+Binary Classification → ใครชนะ
+
+Multi-class → 2-0 / 2-1
+
+Regression → ทำนายครึ่งแรกสกอร์
+
+อาจารย์เห็นแบบนี้ = คะแนนบวก
