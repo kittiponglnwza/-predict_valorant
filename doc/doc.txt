@@ -1,0 +1,14 @@
+จุดที่ต้องแก้ถ้าอยาก serious จริง
+
+ขยาย test set ให้ใหญ่กว่า 62 นัด
+
+แยก season-based test ชัดเจน
+
+Backtest เฉพาะ opening odds เท่านั้น
+
+ตัด feature low-importance 5–10 ตัว
+
+ลอง train model ที่ “ไม่มี market feature” เทียบดู
+
+ถ้าไม่มี market แล้ว accuracy ดรอปเหลือ 49%
+แปลว่า edge มาจาก odds เป็นหลัก

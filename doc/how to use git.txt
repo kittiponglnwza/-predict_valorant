@@ -1,0 +1,13 @@
+git add .
+git commit -m " ดีละ แต่เพิ่มได้อีก 26/2/69 "
+git push
+
+
+้how to run  ui 
+
+streamlit run app_ui.py
+
+
+and program
+
+python app.py
