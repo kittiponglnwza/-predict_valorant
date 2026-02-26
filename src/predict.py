@@ -801,6 +801,61 @@ def predict_with_api(team, ctx, num_matches=5):
 
 
 # ══════════════════════════════════════════════════════════════
+# GET PL STANDINGS FROM API (ตารางคะแนนจริงจาก football-data.org)
+# ══════════════════════════════════════════════════════════════
+
+def get_pl_standings_from_api(season: int = None):
+    """
+    ดึงตารางคะแนน Premier League จาก football-data.org API
+    season: ปี เช่น 2024 = ฤดูกาล 2024/25, None = ฤดูกาลปัจจุบัน
+    คืน list of dict หรือ None ถ้าดึงไม่ได้
+    """
+    url = "https://api.football-data.org/v4/competitions/PL/standings"
+    headers = {"X-Auth-Token": API_KEY}
+    params = {}
+    if season is not None:
+        params["season"] = season
+
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+
+        standings_raw = data.get("standings", [])
+        # standings มี 3 type: TOTAL, HOME, AWAY — เอา TOTAL
+        total = next((s for s in standings_raw if s.get("type") == "TOTAL"), None)
+        if not total:
+            return None
+
+        rows = []
+        for entry in total.get("table", []):
+            team_name = entry.get("team", {}).get("name", "Unknown")
+            rows.append({
+                "pos":       entry.get("position", 0),
+                "Club":      normalize_team_name(team_name),
+                "MP":        entry.get("playedGames", 0),
+                "W":         entry.get("won", 0),
+                "D":         entry.get("draw", 0),
+                "L":         entry.get("lost", 0),
+                "GF":        entry.get("goalsFor", 0),
+                "GA":        entry.get("goalsAgainst", 0),
+                "GD":        entry.get("goalDifference", 0),
+                "PTS":       entry.get("points", 0),
+                "Form":      entry.get("form", "") or "",
+            })
+
+        rows.sort(key=lambda x: x["pos"])
+        return rows
+
+    except requests.exceptions.ConnectionError:
+        print("  ❌ get_pl_standings: เชื่อมต่อ API ไม่ได้")
+        return None
+    except Exception as e:
+        print(f"  ❌ get_pl_standings error: {e}")
+        return None
+
+
+# ══════════════════════════════════════════════════════════════
 # SHOW NEXT PL FIXTURES (ตารางแข่งและทำนาย 5 นัดถัดไป)
 # ══════════════════════════════════════════════════════════════
 

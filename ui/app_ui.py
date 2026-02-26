@@ -22,7 +22,7 @@ from src.model import run_training_pipeline, load_model
 from src.predict import (
     predict_match, predict_score, get_last_5_results,
     run_season_simulation, update_season_csv_from_api,
-    show_next_pl_fixtures,
+    show_next_pl_fixtures, get_pl_standings_from_api,
 )
 from src.analysis import (
     run_monte_carlo, backtest_roi,
@@ -481,328 +481,249 @@ def page_fixtures(ctx):
             st.error("Unable to fetch upcoming fixtures.")
 
 
+def _make_styled_table(display_df, pts_col, max_pts):
+    """Shared Pandas Styler สำหรับตารางทั้ง 2 แบบ"""
+    def _row_bg(row):
+        p = row.name
+        if p == 1:   bg = 'rgba(255,215,0,0.07)'
+        elif p <= 4: bg = 'rgba(0,176,255,0.06)'
+        elif p <= 6: bg = 'rgba(249,115,22,0.06)'
+        elif p <= 7: bg = 'rgba(168,85,247,0.05)'
+        elif p >= 18:bg = 'rgba(239,68,68,0.07)'
+        else:        bg = 'transparent'
+        return [f'background-color:{bg}'] * len(row)
+
+    def _color_zone(val):
+        m = {'👑': '#FFD700','⚽': '#00B0FF','🌍': '#F97316','🏅': '#A855F7','🔻': '#EF4444'}
+        for emoji, color in m.items():
+            if emoji in str(val):
+                return f'color:{color};font-weight:600'
+        return 'color:#475569'
+
+    styled = (
+        display_df.style
+        .apply(_row_bg, axis=1)
+        .applymap(_color_zone, subset=['Zone'])
+        .bar(subset=[pts_col], color='rgba(0,176,255,0.2)', vmin=0, vmax=max_pts)
+    )
+    return styled
+
+
+def _zone_label(pos):
+    if pos == 1:   return "👑 Champion"
+    if pos <= 4:   return "⚽ Champions League"
+    if pos <= 6:   return "🌍 Europa League"
+    if pos <= 7:   return "🏅 Conference"
+    if pos >= 18:  return "🔻 Relegation"
+    return "➖ Mid-table"
+
+
+def _find_team_col(df):
+    for c in ['Team', 'team', 'index', 'Club', 'club', 'HomeTeam']:
+        if c in df.columns:
+            return c
+    for c in df.columns:
+        if df[c].dtype == object:
+            return c
+    return df.columns[0]
+
+
 def page_season(ctx):
-    # ── Shared inline CSS (safe: only simple selectors, no grid layout) ───
     st.markdown("""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&display=swap');
-
-    /* Hero banner */
+    @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@400;500;600&display=swap');
     .season-hero {
-        background: linear-gradient(135deg, #0f1923 0%, #0a1628 50%, #0d1f3c 100%);
+        background: linear-gradient(135deg,#0f1923 0%,#0a1628 50%,#0d1f3c 100%);
         border: 1px solid rgba(255,255,255,0.07);
         border-radius: 20px;
-        padding: 2.2rem 2.5rem 2rem;
-        margin-bottom: 1.5rem;
-        position: relative;
-        overflow: hidden;
+        padding: 2rem 2.5rem 1.8rem;
+        margin-bottom: 1.2rem;
+        position: relative; overflow: hidden;
     }
     .season-hero::before {
-        content: '';
-        position: absolute;
-        top: -80px; right: -80px;
-        width: 320px; height: 320px;
-        background: radial-gradient(circle, rgba(0,176,255,0.10) 0%, transparent 70%);
-        border-radius: 50%;
-        pointer-events: none;
+        content:''; position:absolute; top:-80px; right:-80px;
+        width:300px; height:300px;
+        background:radial-gradient(circle,rgba(0,176,255,0.10) 0%,transparent 70%);
+        border-radius:50%; pointer-events:none;
     }
-    .hero-eyebrow {
-        font-family: 'DM Sans', sans-serif;
-        font-size: 0.68rem;
-        font-weight: 600;
-        letter-spacing: 0.22em;
-        text-transform: uppercase;
-        color: #00B0FF;
-        margin-bottom: 0.35rem;
-    }
-    .hero-heading {
-        font-family: 'Bebas Neue', cursive;
-        font-size: 3.6rem;
-        letter-spacing: 0.04em;
-        line-height: 1;
-        color: #fff;
-        margin: 0 0 0.4rem;
-    }
-    .hero-heading span {
-        background: linear-gradient(90deg, #00B0FF 0%, #00E676 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-    }
-    .hero-sub {
-        font-family: 'DM Sans', sans-serif;
-        font-size: 0.85rem;
-        color: #4B6080;
-    }
-
-    /* Table header row */
-    .tbl-header {
-        background: rgba(255,255,255,0.03);
-        border: 1px solid rgba(255,255,255,0.06);
-        border-radius: 10px 10px 0 0;
-        padding: 0.55rem 0.6rem;
-        margin-bottom: 0;
-    }
-    .tbl-hcell {
-        font-family: 'DM Sans', sans-serif;
-        font-size: 0.62rem;
-        font-weight: 600;
-        letter-spacing: 0.12em;
-        text-transform: uppercase;
-        color: #3D5068;
-        text-align: center;
-    }
-
-    /* Each data row */
-    .tbl-row {
-        padding: 0.55rem 0.6rem;
-        border: 1px solid rgba(255,255,255,0.04);
-        border-top: none;
-        transition: background 0.15s ease;
-    }
-    .tbl-row:hover { background: rgba(255,255,255,0.025); }
-    .tbl-row:last-child { border-radius: 0 0 10px 10px; }
-
-    /* Zone separator lines */
-    .zone-sep-ucl { border-top: 2px dashed rgba(0,176,255,0.35) !important; }
-    .zone-sep-uel { border-top: 2px dashed rgba(249,115,22,0.35) !important; }
-    .zone-sep-rel { border-top: 2px dashed rgba(239,68,68,0.35) !important; }
-
-    /* Rank number styling */
-    .rank-num {
-        font-family: 'Bebas Neue', cursive;
-        font-size: 1.15rem;
-        text-align: center;
-        line-height: 1;
-    }
-
-    /* Zone badge pills */
-    .zbadge {
-        display: inline-block;
-        padding: 2px 9px;
-        border-radius: 20px;
-        font-family: 'DM Sans', sans-serif;
-        font-size: 0.68rem;
-        font-weight: 600;
-        letter-spacing: 0.04em;
-        white-space: nowrap;
-    }
-    .zbadge-champion { background: rgba(255,215,0,0.15); color: #FFD700; border: 1px solid rgba(255,215,0,0.3); }
-    .zbadge-ucl  { background: rgba(0,176,255,0.14); color: #00B0FF; border: 1px solid rgba(0,176,255,0.28); }
-    .zbadge-uel  { background: rgba(249,115,22,0.14); color: #F97316; border: 1px solid rgba(249,115,22,0.28); }
-    .zbadge-uecl { background: rgba(168,85,247,0.14); color: #A855F7; border: 1px solid rgba(168,85,247,0.28); }
-    .zbadge-rel  { background: rgba(239,68,68,0.14);  color: #EF4444; border: 1px solid rgba(239,68,68,0.28); }
-    .zbadge-mid  { background: rgba(100,116,139,0.08); color: #64748B; border: 1px solid rgba(100,116,139,0.18); }
-
-    /* Points bar */
-    .pts-bar-track {
-        background: rgba(255,255,255,0.06);
-        border-radius: 3px;
-        height: 4px;
-        margin-top: 4px;
-        overflow: hidden;
-    }
-    .pts-bar-fill { height: 100%; border-radius: 3px; }
-
-    /* Legend strip */
-    .tbl-legend {
-        background: rgba(255,255,255,0.02);
-        border: 1px solid rgba(255,255,255,0.05);
-        border-top: none;
-        border-radius: 0 0 12px 12px;
-        padding: 0.65rem 1rem;
-        margin-top: -1px;
-    }
+    .hero-eyebrow { font-family:'DM Sans',sans-serif; font-size:0.65rem; font-weight:600;
+        letter-spacing:0.22em; text-transform:uppercase; color:#00B0FF; margin-bottom:0.3rem; }
+    .hero-heading { font-family:'Bebas Neue',cursive; font-size:3.2rem; letter-spacing:0.04em;
+        line-height:1; color:#fff; margin:0 0 0.3rem; }
+    .hero-heading span { background:linear-gradient(90deg,#00B0FF,#00E676);
+        -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
+    .hero-sub { font-family:'DM Sans',sans-serif; font-size:0.82rem; color:#4B6080; }
     </style>
     """, unsafe_allow_html=True)
 
-    # ── Hero Banner ────────────────────────────────────────────────────────
+    # ── Hero ──────────────────────────────────────────────────────────────
     st.markdown("""
     <div class="season-hero">
-        <div class="hero-eyebrow">🔮 AI Powered Forecast</div>
+        <div class="hero-eyebrow">📊 Premier League</div>
         <div class="hero-heading">SEASON <span>TABLE</span></div>
-        <div class="hero-sub">Monte Carlo simulation · Remaining fixtures projected to end of season</div>
+        <div class="hero-sub">ดูตารางคะแนนปัจจุบัน หรือให้ AI จำลองผลถึงสิ้นฤดูกาล</div>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Action Buttons ─────────────────────────────────────────────────────
-    b1, b2, _ = st.columns([1, 1, 2], gap="medium")
-    sync_clicked = b1.button("⟳  Sync Season Data", use_container_width=True)
-    sim_clicked  = b2.button("🔮  Run Simulation", type="primary", use_container_width=True)
+    # ── 2 Tabs ────────────────────────────────────────────────────────────
+    tab_current, tab_sim = st.tabs(["📋  ตารางคะแนนปัจจุบัน", "🔮  AI Simulation"])
 
-    if sync_clicked:
-        with st.spinner("Syncing season data from API..."):
-            _silent(update_season_csv_from_api)
-        st.success("✅ Season data synced successfully.")
+    # ════════════════════════════════════════════════════════════════
+    # TAB 1 — ตารางคะแนนปัจจุบัน (จาก CSV จริง)
+    # ════════════════════════════════════════════════════════════════
+    with tab_current:
+        st.write("")
 
-    if sim_clicked:
-        with st.spinner("🔮 Simulating remaining fixtures..."):
-            ctx_new = _silent(run_season_simulation, ctx)
-            st.session_state['ctx'] = ctx_new
-            ctx = ctx_new
+        # ── Season selector (ปีที่ football-data.org ใช้ = ปีเริ่มต้น เช่น 2024 = 2024/25) ──
+        current_year = TODAY.year
+        # ถ้าเดือน >= 8 ฤดูกาลปัจจุบันเริ่มแล้ว ไม่งั้นยังเป็นฤดูกาลที่แล้ว
+        current_season_year = current_year if TODAY.month >= 8 else current_year - 1
+        season_options = list(range(current_season_year, current_season_year - 6, -1))
+        season_labels  = {y: f"{y}/{str(y+1)[2:]}" for y in season_options}
 
-    # ── League Table ───────────────────────────────────────────────────────
-    ft = ctx.get('final_table')
-
-    if ft is not None:
-        # reset_index(drop=False) เก็บ index เดิมไว้เป็น column
-        df = ft.sort_values('FinalPoints', ascending=False).reset_index(drop=False)
-        df.index = range(1, len(df) + 1)
-
-        # หาชื่อ column ที่เก็บชื่อทีม
-        team_col = None
-        for candidate in ['Team', 'team', 'index', 'Club', 'club', 'HomeTeam']:
-            if candidate in df.columns:
-                team_col = candidate
-                break
-        if team_col is None:
-            # fallback: column แรกที่ dtype เป็น object/string
-            for col in df.columns:
-                if df[col].dtype == object:
-                    team_col = col
-                    break
-        if team_col is None:
-            team_col = df.columns[0]
-
-        max_pts = max(df['FinalPoints'].max(), 1)
-
-        def _rank_color(pos):
-            if pos == 1:   return "#FFD700"
-            if pos <= 4:   return "#00B0FF"
-            if pos <= 6:   return "#F97316"
-            if pos >= 18:  return "#EF4444"
-            return "#3D5068"
-
-        def _bar_color(pos):
-            if pos == 1:   return "linear-gradient(90deg,#FFD700,#FFA500)"
-            if pos <= 4:   return "linear-gradient(90deg,#00B0FF,#0081CB)"
-            if pos <= 6:   return "linear-gradient(90deg,#F97316,#EA580C)"
-            if pos >= 18:  return "linear-gradient(90deg,#EF4444,#DC2626)"
-            return "linear-gradient(90deg,#334155,#1E293B)"
-
-        def _badge(pos):
-            if pos == 1:
-                return '<span class="zbadge zbadge-champion">👑 Champion</span>'
-            if pos <= 4:
-                return '<span class="zbadge zbadge-ucl">⚽ Champions League</span>'
-            if pos <= 6:
-                return '<span class="zbadge zbadge-uel">🌍 Europa League</span>'
-            if pos <= 7:
-                return '<span class="zbadge zbadge-uecl">🏅 Conference</span>'
-            if pos >= 18:
-                return '<span class="zbadge zbadge-rel">🔻 Relegation</span>'
-            return '<span class="zbadge zbadge-mid">—</span>'
-
-        def _diff_html(real, final):
-            d = final - real
-            if d > 0:  return f'<span style="color:#00E676;font-size:0.72rem;font-family:DM Sans,sans-serif">+{d:.0f}</span>'
-            if d < 0:  return f'<span style="color:#EF4444;font-size:0.72rem;font-family:DM Sans,sans-serif">{d:.0f}</span>'
-            return     f'<span style="color:#3D5068;font-size:0.72rem;font-family:DM Sans,sans-serif">±0</span>'
-
-        # ── Build display DataFrame ──────────────────────────────
-        def _zone_label(pos):
-            if pos == 1:   return "👑 Champion"
-            if pos <= 4:   return "⚽ Champions League"
-            if pos <= 6:   return "🌍 Europa League"
-            if pos <= 7:   return "🏅 Conference"
-            if pos >= 18:  return "🔻 Relegation"
-            return "➖ Mid-table"
-
-        display_df = pd.DataFrame({
-            'Club':      [str(df.loc[pos, team_col]) for pos in df.index],
-            'PTS':       [int(df.loc[pos, 'RealPoints'])      for pos in df.index],
-            '+PROJ':     [int(df.loc[pos, 'FinalPoints'] - df.loc[pos, 'RealPoints']) for pos in df.index],
-            'FINAL':     [int(df.loc[pos, 'FinalPoints'])     for pos in df.index],
-            'Zone':      [_zone_label(pos)                    for pos in df.index],
-        }, index=df.index)
-        display_df.index.name = '#'
-
-        # ── Row-level background colors ──────────────────────────
-        def _row_bg(pos):
-            if pos == 1:   return 'background-color: rgba(255,215,0,0.07)'
-            if pos <= 4:   return 'background-color: rgba(0,176,255,0.06)'
-            if pos <= 6:   return 'background-color: rgba(249,115,22,0.06)'
-            if pos <= 7:   return 'background-color: rgba(168,85,247,0.05)'
-            if pos >= 18:  return 'background-color: rgba(239,68,68,0.07)'
-            return ''
-
-        def style_rows(row):
-            bg = _row_bg(row.name)
-            return [bg] * len(row)
-
-        def color_proj(val):
-            if val > 0:  return 'color: #00E676; font-weight: 600'
-            if val < 0:  return 'color: #EF4444; font-weight: 600'
-            return 'color: #475569'
-
-        def color_final(val):
-            return 'font-weight: 700; color: #ffffff'
-
-        def color_zone(val):
-            if 'Champion' in val and '⚽' not in val: return 'color: #FFD700; font-weight: 600'
-            if 'Champions' in val: return 'color: #00B0FF; font-weight: 600'
-            if 'Europa'    in val: return 'color: #F97316; font-weight: 600'
-            if 'Conference'in val: return 'color: #A855F7; font-weight: 600'
-            if 'Relegation'in val: return 'color: #EF4444; font-weight: 600'
-            return 'color: #475569'
-
-        styled = (
-            display_df.style
-            .apply(style_rows, axis=1)
-            .applymap(color_proj,   subset=['+PROJ'])
-            .applymap(color_final,  subset=['FINAL'])
-            .applymap(color_zone,   subset=['Zone'])
-            .bar(subset=['FINAL'], color='rgba(0,176,255,0.25)', vmin=0, vmax=max_pts)
-            .format({'+PROJ': lambda x: f'+{x}' if x > 0 else str(x)})
+        sc1, sc2 = st.columns([1, 3])
+        selected_year = sc1.selectbox(
+            "🗓️ ฤดูกาล",
+            options=season_options,
+            format_func=lambda y: season_labels[y],
+            index=0,
+            key="season_year_select"
         )
 
-        st.dataframe(styled, use_container_width=True, height=740)
+        bsync, _ = sc2.columns([1, 2])
+        if bsync.button("⟳  Refresh", use_container_width=True, key="sync_cur"):
+            st.cache_data.clear()
+            st.rerun()
 
-        # ── Legend ───────────────────────────────────────────────
-        st.caption("👑 Champion · ⚽ Top 4 Champions League · 🌍 Top 6 Europa League · 🏅 Top 7 Conference · 🔻 Bottom 3 Relegation")
+        # ── ดึงตารางจาก API ──────────────────────────────────────
+        @st.cache_data(ttl=300, show_spinner=False)
+        def _fetch_standings(year):
+            return _silent(get_pl_standings_from_api, year)
 
-        # ── Summary Cards ─────────────────────────────────────────
+        with st.spinner("📡 กำลังดึงข้อมูลตารางคะแนนจาก API..."):
+            rows = _fetch_standings(selected_year)
+
+        if rows is None or len(rows) == 0:
+            st.error("❌ ดึงข้อมูลจาก API ไม่ได้ — ตรวจสอบ API Key หรือการเชื่อมต่ออินเทอร์เน็ต")
+        else:
+            tbl = pd.DataFrame(rows)
+            tbl = tbl.drop(columns=['pos'], errors='ignore')
+
+            # แปลง Form string → emoji
+            def _form_emoji(form_str):
+                if not form_str: return ""
+                mapping = {'W': '🟢', 'D': '🟡', 'L': '🔴'}
+                return " ".join(mapping.get(c, '⚪') for c in form_str.split(',') if c)
+
+            if 'Form' in tbl.columns:
+                tbl['Form'] = tbl['Form'].apply(_form_emoji)
+
+            tbl.index = range(1, len(tbl) + 1)
+            tbl.index.name = '#'
+            tbl['Zone'] = [_zone_label(i) for i in tbl.index]
+
+            max_pts_cur = max(tbl['PTS'].max(), 1)
+            styled_cur = _make_styled_table(tbl, 'PTS', max_pts_cur)
+            styled_cur = (
+                styled_cur
+                .applymap(lambda v: 'font-weight:700;color:#fff', subset=['PTS'])
+                .bar(subset=['GD'],
+                     color=['rgba(239,68,68,0.3)', 'rgba(0,230,118,0.3)'],
+                     vmin=-30, vmax=30)
+            )
+            st.dataframe(styled_cur, use_container_width=True, height=720)
+            st.caption(f"📡 ข้อมูลจาก football-data.org · ฤดูกาล {season_labels[selected_year]} · "
+                       f"👑 Champion · ⚽ Top 4 UCL · 🌍 Top 6 Europa · 🏅 Top 7 Conference · 🔻 Bottom 3 Relegation")
+
+    # ════════════════════════════════════════════════════════════════
+    # TAB 2 — AI Simulation
+    # ════════════════════════════════════════════════════════════════
+    with tab_sim:
         st.write("")
-        champion  = df.iloc[0]
-        ucl_teams = df[df.index <= 4]
-        relegated = df[df.index >= 18]
 
-        st.markdown("""
-        <p style="font-family:DM Sans,sans-serif;font-size:0.68rem;font-weight:600;
-                  letter-spacing:0.18em;text-transform:uppercase;color:#3D5068;margin:1.4rem 0 0.6rem">
-            Simulation Highlights
-        </p>
-        """, unsafe_allow_html=True)
+        b1, b2, _ = st.columns([1, 1, 2], gap="medium")
+        sim_clicked = b1.button("🔮  Run Simulation", type="primary",
+                                use_container_width=True, key="run_sim")
+        sync2 = b2.button("⟳  Sync Season Data", use_container_width=True, key="sync_sim")
 
-        s1, s2, s3 = st.columns(3, gap="medium")
-        champ_name = str(champion.get(team_col, '—'))
-        s1.metric("🏆 Predicted Champion", champ_name, f"{int(champion['FinalPoints'])} pts")
+        if sync2:
+            with st.spinner("Syncing..."):
+                _silent(update_season_csv_from_api)
+            st.success("✅ Synced!")
 
-        if not ucl_teams.empty:
-            ucl_list = ", ".join([str(r.get(team_col, '?')) for _, r in ucl_teams.iterrows()])
-            label = ucl_list[:32] + "…" if len(ucl_list) > 32 else ucl_list
-            s2.metric("⚽ UCL Spots (Top 4)", f"{len(ucl_teams)} clubs", label)
+        if sim_clicked:
+            with st.spinner("🔮 Simulating remaining fixtures..."):
+                ctx_new = _silent(run_season_simulation, ctx)
+                st.session_state['ctx'] = ctx_new
+                ctx = ctx_new
 
-        if not relegated.empty:
-            rel_list = ", ".join([str(r.get(team_col, '?')) for _, r in relegated.iterrows()])
-            label = rel_list[:32] + "…" if len(rel_list) > 32 else rel_list
-            s3.metric("🔻 Relegated Teams", f"{len(relegated)} clubs", label)
+        ft = ctx.get('final_table')
 
-    else:
-        # ── Empty state ───────────────────────────────────────────
-        st.write("")
-        st.markdown("""
-        <div style="text-align:center;padding:3.5rem 2rem;
-                    background:linear-gradient(135deg,#0f1923,#0b1320);
-                    border:1px dashed rgba(0,176,255,0.18);border-radius:18px;margin-top:0.5rem">
-            <div style="font-size:3rem;margin-bottom:0.8rem;opacity:0.5">🔮</div>
-            <div style="font-family:'Bebas Neue',cursive;font-size:1.9rem;color:#E2E8F0;letter-spacing:0.06em">
-                SIMULATION READY
+        if ft is not None:
+            df = ft.sort_values('FinalPoints', ascending=False).reset_index(drop=False)
+            df.index = range(1, len(df) + 1)
+            team_col = _find_team_col(df)
+            max_pts = max(df['FinalPoints'].max(), 1)
+
+            display_df = pd.DataFrame({
+                'Club':   [str(df.loc[p, team_col]) for p in df.index],
+                'PTS':    [int(df.loc[p, 'RealPoints']) for p in df.index],
+                '+PROJ':  [int(df.loc[p, 'FinalPoints'] - df.loc[p, 'RealPoints']) for p in df.index],
+                'FINAL':  [int(df.loc[p, 'FinalPoints']) for p in df.index],
+                'Zone':   [_zone_label(p) for p in df.index],
+            }, index=df.index)
+            display_df.index.name = '#'
+
+            def _color_proj(val):
+                if val > 0: return 'color:#00E676;font-weight:600'
+                if val < 0: return 'color:#EF4444;font-weight:600'
+                return 'color:#475569'
+
+            styled_sim = (
+                _make_styled_table(display_df, 'FINAL', max_pts)
+                .applymap(_color_proj, subset=['+PROJ'])
+                .applymap(lambda v: 'font-weight:700;color:#fff', subset=['FINAL'])
+                .format({'+PROJ': lambda x: f'+{x}' if x > 0 else str(x)})
+            )
+
+            st.dataframe(styled_sim, use_container_width=True, height=720)
+            st.caption("👑 Champion · ⚽ Top 4 UCL · 🌍 Top 6 Europa · 🏅 Top 7 Conference · 🔻 Bottom 3 Relegation")
+
+            # ── Summary cards ──────────────────────────────────────
+            st.write("")
+            st.markdown('<p style="font-size:0.68rem;font-weight:600;letter-spacing:0.18em;'
+                        'text-transform:uppercase;color:#3D5068;margin-bottom:0.5rem">'
+                        'Simulation Highlights</p>', unsafe_allow_html=True)
+
+            champion  = df.iloc[0]
+            ucl_teams = df[df.index <= 4]
+            relegated = df[df.index >= 18]
+            s1, s2, s3 = st.columns(3, gap="medium")
+            s1.metric("🏆 Predicted Champion",
+                      str(champion.get(team_col, '—')),
+                      f"{int(champion['FinalPoints'])} pts")
+            if not ucl_teams.empty:
+                names = ", ".join(str(r.get(team_col, '?')) for _, r in ucl_teams.iterrows())
+                s2.metric("⚽ UCL (Top 4)", f"{len(ucl_teams)} clubs",
+                          names[:32] + "…" if len(names) > 32 else names)
+            if not relegated.empty:
+                names = ", ".join(str(r.get(team_col, '?')) for _, r in relegated.iterrows())
+                s3.metric("🔻 Relegated", f"{len(relegated)} clubs",
+                          names[:32] + "…" if len(names) > 32 else names)
+        else:
+            st.markdown("""
+            <div style="text-align:center;padding:3rem 2rem;
+                        background:linear-gradient(135deg,#0f1923,#0b1320);
+                        border:1px dashed rgba(0,176,255,0.18);border-radius:18px;margin-top:0.5rem">
+                <div style="font-size:2.8rem;margin-bottom:0.7rem;opacity:0.45">🔮</div>
+                <div style="font-family:'Bebas Neue',cursive;font-size:1.8rem;color:#E2E8F0;letter-spacing:0.06em">
+                    SIMULATION READY
+                </div>
+                <div style="font-family:'DM Sans',sans-serif;color:#3D5068;font-size:0.82rem;margin-top:0.35rem">
+                    กด <strong style="color:#00B0FF">Run Simulation</strong> เพื่อให้ AI คาดการณ์ผลจนจบฤดูกาล
+                </div>
             </div>
-            <div style="font-family:'DM Sans',sans-serif;color:#3D5068;font-size:0.85rem;margin-top:0.4rem">
-                Press <strong style="color:#00B0FF">Run Simulation</strong> to generate end-of-season predictions
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
 
 
 def page_analysis(ctx):
