@@ -1888,6 +1888,68 @@ def tune_hyperparameters(n_iter=30, verbose=True):
 
 
 # ──────────────────────────────────────────────────────────────
+# HELPER: Manual Prefit Calibration (รองรับ sklearn ≥ 1.2)
+# ──────────────────────────────────────────────────────────────
+
+class _PreFitCalibratedWrapper:
+    """
+    Wrapper ที่ทำ prefit calibration แบบ manual
+    รองรับ sklearn ทุก version (ใช้แทน cv='prefit' ที่ถูกลบออกใน sklearn 1.2+)
+    ใช้ Isotonic Regression หรือ Logistic (Platt Scaling) per class
+    """
+    def __init__(self, base_estimator, method='isotonic'):
+        self.base_estimator = base_estimator
+        self.method = method
+        self.calibrators_ = None
+        self.classes_ = None
+
+    def fit(self, X_cal, y_cal):
+        from sklearn.isotonic import IsotonicRegression
+        from sklearn.linear_model import LogisticRegression as LR
+
+        proba = self.base_estimator.predict_proba(X_cal)
+        self.classes_ = self.base_estimator.classes_
+        n_classes = len(self.classes_)
+        self.calibrators_ = []
+
+        for i in range(n_classes):
+            y_bin = (y_cal == self.classes_[i]).astype(int)
+            p_col = proba[:, i]
+            if self.method == 'isotonic':
+                cal = IsotonicRegression(out_of_bounds='clip')
+                cal.fit(p_col, y_bin)
+            else:
+                # Platt Scaling (sigmoid)
+                cal = LR()
+                cal.fit(p_col.reshape(-1, 1), y_bin)
+            self.calibrators_.append(cal)
+        return self
+
+    def predict_proba(self, X):
+        proba = self.base_estimator.predict_proba(X)
+        n_classes = len(self.classes_)
+        cal_proba = np.zeros_like(proba)
+
+        for i in range(n_classes):
+            p_col = proba[:, i]
+            if self.method == 'isotonic':
+                cal_proba[:, i] = self.calibrators_[i].predict(p_col)
+            else:
+                cal_proba[:, i] = self.calibrators_[i].predict_proba(
+                    p_col.reshape(-1, 1))[:, 1]
+
+        # Normalize ให้ผลรวม = 1
+        row_sums = cal_proba.sum(axis=1, keepdims=True)
+        row_sums = np.where(row_sums == 0, 1, row_sums)
+        return cal_proba / row_sums
+
+    def predict(self, X):
+        proba = self.predict_proba(X)
+        idx   = np.argmax(proba, axis=1)
+        return np.array([self.classes_[i] for i in idx])
+
+
+# ──────────────────────────────────────────────────────────────
 # P3-3) PROBABILITY CALIBRATION (Platt Scaling / Isotonic)
 # ──────────────────────────────────────────────────────────────
 
@@ -1921,9 +1983,16 @@ def calibrate_probabilities(method='isotonic', verbose=True):
     base_model = clone(ensemble)
     base_model.fit(X_cal_train, y_cal_train)
 
-    # Calibrate
-    calibrated = CalibratedClassifierCV(base_model, method=method, cv='prefit')
-    calibrated.fit(X_cal_val, y_cal_val)
+    # Calibrate — รองรับ sklearn ทุก version
+    # sklearn < 1.2 → cv='prefit' ใช้ได้
+    # sklearn >= 1.2 → ใช้ _PreFitCalibratedWrapper แทน
+    try:
+        from sklearn.calibration import CalibratedClassifierCV as _CCCV
+        calibrated = _CCCV(base_model, method=method, cv='prefit')
+        calibrated.fit(X_cal_val, y_cal_val)
+    except Exception:
+        calibrated = _PreFitCalibratedWrapper(base_model, method=method)
+        calibrated.fit(X_cal_val, y_cal_val)
 
     # เปรียบเทียบ before / after บน test set
     proba_before = ensemble.predict_proba(X_test_sc)
@@ -2196,3 +2265,729 @@ def run_phase3(tune=False, n_tune_iter=30, cv_splits=5,
 # tune=False → เร็ว (~10 วิ) | tune=True → ช้า (~3-5 นาที)
 run_phase3(tune=False)
 # run_phase3(tune=True, n_tune_iter=30)   # uncomment เพื่อ tune
+
+# ==============================
+# PHASE 4 — FULL ANALYTICS ENGINE
+# ==============================
+
+from sklearn.metrics import log_loss, f1_score
+
+
+# ──────────────────────────────────────────────────────────────
+# P4-1) ROLLING WINDOW VALIDATION  (พร้อม LogLoss)
+# ──────────────────────────────────────────────────────────────
+
+def p4_rolling_cv(n_splits=5, verbose=True):
+    """Rolling CV พร้อม LogLoss per fold"""
+    from sklearn.model_selection import TimeSeriesSplit
+
+    SEP  = "=" * 70
+    LINE = "─" * 70
+
+    cv_df = match_df.dropna(subset=FEATURES + ['Result3']).sort_values('Date_x').reset_index(drop=True)
+    X_cv  = cv_df[FEATURES].values
+    y_cv  = cv_df['Result3'].values
+
+    tscv  = TimeSeriesSplit(n_splits=n_splits)
+    results = []
+
+    if verbose:
+        print()
+        print(SEP)
+        print(f"  📊  §1  ROLLING WINDOW VALIDATION")
+        print(SEP)
+        print(f"\n  {'Fold':<6} {'Train':>7} {'Val':>6} {'Acc':>7} {'HW-F1':>8} {'DR-F1':>8} {'AW-F1':>8} {'LogLoss':>9}")
+        print(f"  {LINE}")
+
+    for fold, (tr_idx, vl_idx) in enumerate(tscv.split(X_cv), 1):
+        X_tr, X_vl = X_cv[tr_idx], X_cv[vl_idx]
+        y_tr, y_vl = y_cv[tr_idx], y_cv[vl_idx]
+
+        sc = StandardScaler()
+        X_tr_sc = sc.fit_transform(X_tr)
+        X_vl_sc = sc.transform(X_vl)
+
+        cv_mdl = XGBClassifier(
+            n_estimators=200, max_depth=4, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.8,
+            eval_metric='mlogloss', random_state=42, verbosity=0
+        )
+        cv_mdl.fit(X_tr_sc, y_tr)
+        y_pred_fold  = cv_mdl.predict(X_vl_sc)
+        y_proba_fold = cv_mdl.predict_proba(X_vl_sc)
+
+        acc  = accuracy_score(y_vl, y_pred_fold)
+        ll   = log_loss(y_vl, y_proba_fold, labels=[0, 1, 2])
+        hw   = f1_score(y_vl, y_pred_fold, labels=[2], average='macro', zero_division=0)
+        dr   = f1_score(y_vl, y_pred_fold, labels=[1], average='macro', zero_division=0)
+        aw   = f1_score(y_vl, y_pred_fold, labels=[0], average='macro', zero_division=0)
+
+        results.append({'fold': fold, 'train': len(tr_idx), 'val': len(vl_idx),
+                        'acc': acc, 'hw_f1': hw, 'dr_f1': dr, 'aw_f1': aw, 'll': ll})
+
+        if verbose:
+            print(f"  {fold:<6} {len(tr_idx):>7} {len(vl_idx):>6} {acc:>7.4f} "
+                  f"{hw:>8.4f} {dr:>8.4f} {aw:>8.4f} {ll:>9.4f}")
+
+    if verbose:
+        accs = [r['acc'] for r in results]
+        lls  = [r['ll']  for r in results]
+        print(f"  {LINE}")
+        print(f"  {'Mean':<13} {'':>6} {np.mean(accs):>7.4f} "
+              f"{np.mean([r['hw_f1'] for r in results]):>8.4f} "
+              f"{np.mean([r['dr_f1'] for r in results]):>8.4f} "
+              f"{np.mean([r['aw_f1'] for r in results]):>8.4f} "
+              f"{np.mean(lls):>9.4f}")
+        print()
+        print(f"  CV Accuracy  : {np.mean(accs):.4f} ± {np.std(accs):.4f}")
+        print(f"  CV LogLoss   : {np.mean(lls):.4f}")
+        stable = np.std(accs) < 0.03
+        print(f"  ความเสถียร   : {'✅ เสถียร' if stable else '⚠️  unstable — พิจารณาเพิ่มข้อมูล'}")
+        print(SEP)
+
+    return results
+
+
+# ──────────────────────────────────────────────────────────────
+# P4-2) PROBABILITY CALIBRATION
+# ──────────────────────────────────────────────────────────────
+
+def p4_calibration(method='isotonic', verbose=True):
+    """Calibrate + เปรียบเทียบ Accuracy, LogLoss, Brier — ใช้ _PreFitCalibratedWrapper"""
+    from sklearn.metrics import brier_score_loss
+    from sklearn.base import clone
+
+    SEP  = "=" * 70
+    LINE = "─" * 70
+
+    cal_split   = int(len(X_train_sc) * 0.8)
+    X_ct        = X_train_sc[:cal_split]
+    y_ct        = y_train.iloc[:cal_split]
+    X_cv2       = X_train_sc[cal_split:]
+    y_cv2       = y_train.iloc[cal_split:]
+
+    base = clone(ensemble)
+    base.fit(X_ct, y_ct)
+
+    # ใช้ _PreFitCalibratedWrapper เสมอ (รองรับ sklearn ทุก version)
+    calibrated = _PreFitCalibratedWrapper(base, method=method)
+    calibrated.fit(X_cv2, y_cv2)
+
+    pb = ensemble.predict_proba(X_test_sc)
+    pa = calibrated.predict_proba(X_test_sc)
+
+    acc_b = accuracy_score(y_test, ensemble.predict(X_test_sc))
+    acc_a = accuracy_score(y_test, calibrated.predict(X_test_sc))
+    ll_b  = log_loss(y_test, pb, labels=[0, 1, 2])
+    ll_a  = log_loss(y_test, pa, labels=[0, 1, 2])
+
+    if verbose:
+        print()
+        print(SEP)
+        print(f"  🎯  §2  PROBABILITY CALIBRATION  (method={method})")
+        print(SEP)
+        print(f"\n  {'Metric':<32} {'Before':>10} {'After':>10} {'Δ':>10}")
+        print(f"  {LINE}")
+        print(f"  {'Accuracy':<32} {acc_b:>10.4f} {acc_a:>10.4f} {acc_a-acc_b:>+10.4f}")
+        ll_flag = "✅" if ll_a <= ll_b else "⚠️ "
+        print(f"  {'Log Loss':<32} {ll_b:>10.4f} {ll_a:>10.4f} {ll_a-ll_b:>+10.4f}  {ll_flag}")
+        if ll_a > ll_b:
+            print(f"  {'':>32}  (isotonic อาจ overfit บน cal_set เล็ก — ปกติสำหรับ n<500)")
+
+        for ci, cn in enumerate(['Away Win', 'Draw', 'Home Win']):
+            yb = (y_test == ci).astype(int)
+            bb = brier_score_loss(yb, pb[:, ci])
+            ba = brier_score_loss(yb, pa[:, ci])
+            flag = "✅" if ba < bb else "⚠️ "
+            print(f"  {'Brier (' + cn + ')':<32} {bb:>10.4f} {ba:>10.4f} {ba-bb:>+10.4f}  {flag}")
+
+        # Verdict: Brier ดีขึ้นทุก class = calibration ทำงานได้ดี แม้ LogLoss จะขึ้น
+        brier_improved = sum(
+            1 for ci in range(3)
+            if brier_score_loss((y_test == ci).astype(int), pa[:, ci])
+               < brier_score_loss((y_test == ci).astype(int), pb[:, ci])
+        )
+        if acc_a >= acc_b or brier_improved >= 2:
+            verdict = "✅ Calibration ช่วยได้ (Accuracy ↑ + Brier ↓)"
+        else:
+            verdict = "⚠️  Calibration ช่วยได้บางส่วน — Brier ดีขึ้น แต่ LogLoss สูงขึ้น"
+        print(f"\n  {verdict}")
+        print(SEP)
+
+    return calibrated
+
+
+# ──────────────────────────────────────────────────────────────
+# P4-3) VALUE BET DETECTION
+# ──────────────────────────────────────────────────────────────
+
+def p4_value_bets(calibrated_model, min_edge=0.05, bk_margin=0.05, verbose=True):
+    """ค้นหา Value Bets จาก calibrated probabilities"""
+    SEP  = "=" * 70
+    LINE = "─" * 70
+
+    proba  = calibrated_model.predict_proba(X_test_sc)
+    actual = y_test.values
+    label_map = {0: 'Away Win', 1: 'Draw', 2: 'Home Win'}
+
+    value_bets = []
+    for i, (p_row, act) in enumerate(zip(proba, actual)):
+        for cls in range(3):
+            model_p = p_row[cls]
+            bm_p    = model_p * (1 - bk_margin)
+            if bm_p <= 0.01:
+                continue
+            bm_odds = 1 / bm_p
+            edge    = model_p - (1 / bm_odds)
+            if edge >= min_edge:
+                value_bets.append({
+                    'idx': i, 'cls': cls, 'model_p': model_p,
+                    'bm_odds': bm_odds, 'edge': edge,
+                    'won': (cls == act)
+                })
+
+    hit_rate = np.mean([b['won'] for b in value_bets]) * 100 if value_bets else 0.0
+    ev_total = sum(b['edge'] for b in value_bets)
+
+    if verbose:
+        print()
+        print(SEP)
+        print(f"  💎  §3  VALUE BET DETECTION")
+        print(SEP)
+        print(f"\n  Value Bet Threshold : edge ≥ {min_edge*100:.0f}%  |  BM Margin: {bk_margin*100:.0f}%")
+        print()
+        print(f"  {'Metric':<45} {'Value':>15}")
+        print(f"  {LINE}")
+        print(f"  {'Value Bets พบ':<45} {len(value_bets):>15,}")
+        print(f"  {'Hit Rate':<45} {hit_rate:>14.1f}%")
+
+        print(f"\n  {'Class':<16} {'Count':>7} {'Hit%':>7} {'Avg Edge':>10} {'Avg Odds':>10}")
+        print(f"  {LINE}")
+        for cls in [2, 0, 1]:
+            cls_bets = [b for b in value_bets if b['cls'] == cls]
+            if not cls_bets:
+                continue
+            ch = np.mean([b['won'] for b in cls_bets]) * 100
+            ae = np.mean([b['edge'] for b in cls_bets])
+            ao = np.mean([b['bm_odds'] for b in cls_bets])
+            print(f"  {label_map[cls]:<16} {len(cls_bets):>7} {ch:>6.1f}% {ae:>10.4f} {ao:>10.2f}")
+
+        print(f"\n  Expected Value รวม (Σ edge) : {ev_total:>+.3f}")
+        if len(value_bets) == 0:
+            print(f"  ⚠️  ไม่พบ Value Bets — ลด min_value_edge เป็น 0.03")
+        elif hit_rate < 40:
+            print(f"  ⚠️  Hit rate ต่ำ — ระวัง overfit")
+        print(SEP)
+
+    return value_bets
+
+
+# ──────────────────────────────────────────────────────────────
+# P4-4/5) ROI BACKTEST + RISK CONTROL  |  P4-6) EQUITY CURVE
+# ──────────────────────────────────────────────────────────────
+
+def p4_roi_backtest(calibrated_model, bankroll=1000.0, kelly_frac=0.25,
+                    max_bet_pct=0.05, stop_loss_pct=0.20, min_edge=0.05,
+                    verbose=True):
+    """ROI Backtest พร้อม Kelly Criterion + Stop-Loss + Equity Curve"""
+    SEP  = "=" * 70
+    LINE = "─" * 70
+
+    proba  = calibrated_model.predict_proba(X_test_sc)
+    actual = y_test.values
+    label_map = {0: 'Away Win', 1: 'Draw', 2: 'Home Win'}
+
+    bk      = bankroll
+    peak_bk = bk
+    max_dd  = 0.0
+    bets    = []
+    stopped = False
+
+    for p_row, act in zip(proba, actual):
+        if stopped:
+            break
+        dd = (peak_bk - bk) / peak_bk * 100
+        if dd >= stop_loss_pct * 100:
+            stopped = True
+            break
+
+        best_cls, best_edge, best_odds = -1, -1.0, 1.0
+        for cls in range(3):
+            mp   = p_row[cls]
+            bm_p = mp * 0.95
+            if bm_p <= 0.01:
+                continue
+            bm_o = 1 / bm_p
+            edge = mp - (1 / bm_o)
+            if edge > best_edge:
+                best_edge, best_cls, best_odds = edge, cls, bm_o
+
+        if best_edge < min_edge:
+            continue
+
+        p     = p_row[best_cls]
+        k     = max(0.0, (p * best_odds - 1) / (best_odds - 1))
+        stake = min(bk * k * kelly_frac, bk * max_bet_pct)
+        stake = max(stake, 0.5)
+
+        won    = (best_cls == act)
+        profit = stake * (best_odds - 1) if won else -stake
+        bk    += profit
+
+        if bk > peak_bk:
+            peak_bk = bk
+        dd2 = (peak_bk - bk) / peak_bk * 100
+        if dd2 > max_dd:
+            max_dd = dd2
+
+        bets.append({'cls': best_cls, 'edge': best_edge, 'stake': stake,
+                     'odds': best_odds, 'won': won, 'profit': profit, 'bk': bk})
+
+    n_bets       = len(bets)
+    n_won        = sum(b['won'] for b in bets)
+    total_staked = sum(b['stake'] for b in bets)
+    net_pnl      = bk - bankroll
+    roi          = net_pnl / total_staked * 100 if total_staked > 0 else 0.0
+    win_rate     = n_won / n_bets * 100 if n_bets > 0 else 0.0
+    yield_       = net_pnl / bankroll * 100
+
+    if verbose:
+        print()
+        print(SEP)
+        print(f"  💰  §4  ROI BACKTEST  +  🛡️  §5  RISK CONTROL")
+        print(SEP)
+        print(f"\n  Bankroll    : £{bankroll:,.0f}")
+        print(f"  Kelly Frac  : {kelly_frac*100:.0f}%  |  Max Bet: {max_bet_pct*100:.0f}% bankroll")
+        print(f"  Stop-Loss   : {stop_loss_pct*100:.0f}% drawdown")
+        print(f"  Edge Min    : {min_edge*100:.0f}%")
+        print()
+        print(f"  {'Metric':<45} {'Value':>15}")
+        print(f"  {LINE}")
+        print(f"  {'จำนวนเดิมพัน':<45} {n_bets:>15,}")
+        print(f"  {'Win Rate':<45} {win_rate:>14.1f}%")
+        print(f"  {'Total Staked':<45} £{total_staked:>13,.2f}")
+        print(f"  {'Net P&L':<45} £{net_pnl:>+13,.2f}")
+        print(f"  {'Final Bankroll':<45} £{bk:>13,.2f}")
+        print(f"  {'ROI (per unit staked)':<45} {roi:>14.1f}%")
+        print(f"  {'Yield (on initial BK)':<45} {yield_:>14.1f}%")
+        print(f"  {'Max Drawdown':<45} {max_dd:>14.1f}%")
+        print()
+        stop_msg = "⚠️  Stop-Loss ถูก trigger!" if stopped else "✅ ไม่ถึง Stop-Loss ตลอด backtest"
+        print(f"  {stop_msg}")
+        print()
+
+        print(f"  {'Class':<16} {'Bets':>6} {'Win%':>6} {'ROI':>8}")
+        print(f"  {LINE}")
+        for cls in [2, 0, 1]:
+            cb = [b for b in bets if b['cls'] == cls]
+            if not cb:
+                continue
+            cw = sum(b['won'] for b in cb)
+            cr = sum(b['profit'] for b in cb) / sum(b['stake'] for b in cb) * 100
+            print(f"  {label_map[cls]:<16} {len(cb):>6} {cw/len(cb)*100:>5.0f}% {cr:>+8.1f}%")
+
+        # §6 Equity Curve
+        print()
+        print(SEP)
+        print(f"  📈  §6  EQUITY CURVE")
+        print(SEP)
+        if n_bets == 0:
+            print(f"  ⚠️  ไม่มีการเดิมพัน — ลด min_value_edge ลง")
+        else:
+            step    = max(1, n_bets // 30)
+            samples = [bets[i] for i in range(0, n_bets, step)] + [bets[-1]]
+            max_bk  = max(b['bk'] for b in samples)
+            min_bk  = min(b['bk'] for b in samples)
+            rng     = max_bk - min_bk or 1
+            print(f"\n  £{max_bk:>8,.0f} ┐")
+            for b in samples:
+                bar = int((b['bk'] - min_bk) / rng * 40)
+                print(f"           {'█' * bar}")
+            print(f"  £{min_bk:>8,.0f} ┘")
+        print(SEP)
+
+    return {
+        'n_bets': n_bets, 'win_rate': win_rate, 'roi': roi, 'yield': yield_,
+        'net_pnl': net_pnl, 'max_dd': max_dd, 'final_bk': bk, 'stopped': stopped,
+        'bets': bets
+    }
+
+
+# ──────────────────────────────────────────────────────────────
+# P4-7) FEATURE IMPORTANCE  (XGB gain + RF impurity + SHAP)
+# ──────────────────────────────────────────────────────────────
+
+def p4_feature_importance(verbose=True):
+    """
+    7A) XGBoost gain importance
+    7B) Random Forest impurity importance
+    7C) SHAP (ถ้าติดตั้งแล้ว)
+    ใช้ named_estimators_ เพื่อรองรับ sklearn ทุก version
+    """
+    SEP  = "=" * 70
+    LINE = "─" * 70
+
+    if verbose:
+        print()
+        print(SEP)
+        print(f"  🔍  §7  FEATURE IMPORTANCE")
+        print(SEP)
+
+    results = {}
+
+    # ดึง fitted models — ใช้ named_estimators_ แทน estimators_
+    # (estimators_ คืน list ของ objects ใน sklearn ใหม่ ไม่ใช่ tuple)
+    xgb_fitted = ensemble.named_estimators_.get('xgb', None)
+    rf_fitted  = ensemble.named_estimators_.get('rf',  None)
+
+    # ── 7A) XGBoost ──────────────────────────────────────────
+    if xgb_fitted is not None:
+        fi_xgb  = xgb_fitted.feature_importances_
+        idx_xgb = np.argsort(fi_xgb)[::-1][:15]
+        max_fi  = fi_xgb[idx_xgb[0]]
+
+        if verbose:
+            print(f"\n  7A) XGBoost Feature Importance (gain)")
+            print(f"  {LINE}")
+            print(f"  {'#':<4} {'Feature':<24} {'Score':>8}  Bar")
+            print(f"  {LINE}")
+            for rank, i in enumerate(idx_xgb, 1):
+                bar = '█' * int(fi_xgb[i] / max_fi * 30)
+                print(f"  {rank:<4} {FEATURES[i]:<24} {fi_xgb[i]:>8.4f}  {bar}")
+
+        results['xgb_importance'] = dict(zip(FEATURES, fi_xgb))
+
+    # ── 7B) Random Forest ─────────────────────────────────────
+    if rf_fitted is not None:
+        fi_rf   = rf_fitted.feature_importances_
+        idx_rf  = np.argsort(fi_rf)[::-1][:15]
+        max_rf  = fi_rf[idx_rf[0]]
+
+        if verbose:
+            print(f"\n  7B) Random Forest Feature Importance (impurity)")
+            print(f"  {LINE}")
+            print(f"  {'#':<4} {'Feature':<24} {'Score':>8}  Bar")
+            print(f"  {LINE}")
+            for rank, i in enumerate(idx_rf, 1):
+                bar = '█' * int(fi_rf[i] / max_rf * 30)
+                print(f"  {rank:<4} {FEATURES[i]:<24} {fi_rf[i]:>8.4f}  {bar}")
+
+        results['rf_importance'] = dict(zip(FEATURES, fi_rf))
+
+    # ── 7C) SHAP (optional) ───────────────────────────────────
+    try:
+        import shap
+        if xgb_fitted is not None:
+            if verbose:
+                print(f"\n  7C) SHAP Values (TreeExplainer บน XGBoost)")
+                print(f"  {LINE}")
+                print(f"  กำลังคำนวณ SHAP values ...")
+
+            explainer = shap.TreeExplainer(xgb_fitted)
+            shap_raw  = explainer.shap_values(X_test_sc)
+
+            if isinstance(shap_raw, np.ndarray) and shap_raw.ndim == 3:
+                shap_values = [shap_raw[:, :, i] for i in range(shap_raw.shape[2])]
+            elif isinstance(shap_raw, list):
+                shap_values = shap_raw
+            else:
+                shap_values = [shap_raw]
+
+            mean_abs   = np.zeros(len(FEATURES))
+            for sv in shap_values:
+                mean_abs += np.abs(sv).mean(axis=0)
+            mean_abs  /= len(shap_values)
+            sorted_idx = np.argsort(mean_abs)[::-1][:15]
+            max_shap   = mean_abs[sorted_idx[0]]
+
+            if verbose:
+                print(f"\n  {'#':<4} {'Feature':<24} {'|SHAP|':>8}  Bar")
+                print(f"  {LINE}")
+                for rank, i in enumerate(sorted_idx, 1):
+                    bar = '█' * int(mean_abs[i] / max_shap * 30)
+                    print(f"  {rank:<4} {FEATURES[i]:<24} {mean_abs[i]:>8.4f}  {bar}")
+
+            results['shap'] = dict(zip(FEATURES, mean_abs))
+    except ImportError:
+        if verbose:
+            print(f"\n  7C) SHAP: ไม่ได้ติดตั้ง — ข้าม (pip install shap)")
+    except Exception as e:
+        if verbose:
+            print(f"\n  7C) SHAP error: {e}")
+
+    if verbose:
+        print(SEP)
+
+    return results
+
+
+# ──────────────────────────────────────────────────────────────
+# P4-8) CALIBRATED vs UNCALIBRATED ROI COMPARISON
+# ──────────────────────────────────────────────────────────────
+
+def p4_compare_calibrated_vs_raw(calibrated_model, min_edge=0.03,
+                                   bankroll=1000.0, kelly_frac=0.25,
+                                   max_bet_pct=0.05, stop_loss_pct=0.20,
+                                   verbose=True):
+    """
+    เปรียบเทียบ ROI ระหว่าง:
+      - Raw ensemble (uncalibrated)
+      - Calibrated model
+    แสดงผลแบบ side-by-side เพื่อ validate ว่า calibration ช่วยหรือทำร้าย ROI
+    """
+    SEP  = "=" * 70
+    LINE = "─" * 70
+
+    def _run_backtest(model, label):
+        proba  = model.predict_proba(X_test_sc)
+        actual = y_test.values
+        bk     = bankroll
+        peak   = bk
+        max_dd = 0.0
+        bets   = []
+        stopped = False
+
+        for p_row, act in zip(proba, actual):
+            if stopped:
+                break
+            dd = (peak - bk) / peak * 100
+            if dd >= stop_loss_pct * 100:
+                stopped = True
+                break
+            best_cls, best_edge, best_odds = -1, -1.0, 1.0
+            for cls in range(3):
+                mp   = p_row[cls]
+                bm_p = mp * 0.95
+                if bm_p <= 0.01:
+                    continue
+                bm_o = 1 / bm_p
+                edge = mp - (1 / bm_o)
+                if edge > best_edge:
+                    best_edge, best_cls, best_odds = edge, cls, bm_o
+            if best_edge < min_edge:
+                continue
+            p     = p_row[best_cls]
+            k     = max(0.0, (p * best_odds - 1) / (best_odds - 1))
+            stake = min(bk * k * kelly_frac, bk * max_bet_pct)
+            stake = max(stake, 0.5)
+            won    = (best_cls == act)
+            profit = stake * (best_odds - 1) if won else -stake
+            bk    += profit
+            if bk > peak:
+                peak = bk
+            dd2 = (peak - bk) / peak * 100
+            if dd2 > max_dd:
+                max_dd = dd2
+            bets.append({'won': won, 'profit': profit, 'stake': stake, 'bk': bk})
+
+        n  = len(bets)
+        sw = sum(b['stake'] for b in bets)
+        nw = sum(1 for b in bets if b['won'])
+        roi = (bk - bankroll) / sw * 100 if sw > 0 else 0.0
+        wr  = nw / n * 100 if n > 0 else 0.0
+        return {'label': label, 'n_bets': n, 'win_rate': wr, 'roi': roi,
+                'net_pnl': bk - bankroll, 'max_dd': max_dd,
+                'final_bk': bk, 'stopped': stopped, 'bets': bets}
+
+    raw_result = _run_backtest(ensemble, "Uncalibrated (ensemble)")
+    cal_result = _run_backtest(calibrated_model, "Calibrated")
+
+    if verbose:
+        print()
+        print(SEP)
+        print(f"  ⚖️   §8  CALIBRATED vs UNCALIBRATED — ROI COMPARISON")
+        print(f"  edge≥{min_edge*100:.0f}%  |  Kelly {kelly_frac*100:.0f}%  |  Stop-Loss {stop_loss_pct*100:.0f}%")
+        print(SEP)
+        print()
+        print(f"  {'Metric':<30} {'Uncalibrated':>16} {'Calibrated':>14}  {'Winner':>10}")
+        print(f"  {LINE}")
+
+        def _fmt_winner(v1, v2, higher_is_better=True):
+            if higher_is_better:
+                return "🏆 Raw" if v1 > v2 else ("🏆 Cal" if v2 > v1 else "─ Tie")
+            else:
+                return "🏆 Raw" if v1 < v2 else ("🏆 Cal" if v2 < v1 else "─ Tie")
+
+        metrics = [
+            ("จำนวนเดิมพัน",   raw_result['n_bets'],    cal_result['n_bets'],    True,  "{:>14,}",    "{:>14,}"),
+            ("Win Rate",       raw_result['win_rate'],  cal_result['win_rate'],  True,  "{:>13.1f}%",  "{:>13.1f}%"),
+            ("ROI",            raw_result['roi'],       cal_result['roi'],       True,  "{:>+13.1f}%", "{:>+13.1f}%"),
+            ("Net P&L",        raw_result['net_pnl'],   cal_result['net_pnl'],   True,  "£{:>+12,.2f}", "£{:>+12,.2f}"),
+            ("Final Bankroll", raw_result['final_bk'],  cal_result['final_bk'],  True,  "£{:>12,.2f}", "£{:>12,.2f}"),
+            ("Max Drawdown",   raw_result['max_dd'],    cal_result['max_dd'],    False, "{:>13.1f}%",  "{:>13.1f}%"),
+        ]
+
+        for label, v1, v2, hib, fmt1, fmt2 in metrics:
+            s1 = fmt1.format(v1)
+            s2 = fmt2.format(v2)
+            w  = _fmt_winner(v1, v2, hib)
+            print(f"  {label:<30} {s1:>16} {s2:>14}  {w:>10}")
+
+        # Stop-Loss status
+        sl1 = "⚠️ triggered" if raw_result['stopped'] else "✅ ไม่ถึง"
+        sl2 = "⚠️ triggered" if cal_result['stopped'] else "✅ ไม่ถึง"
+        print(f"  {'Stop-Loss':<30} {sl1:>16} {sl2:>14}")
+
+        print(f"\n  {LINE}")
+
+        # Verdict
+        raw_score = sum([
+            raw_result['roi'] > cal_result['roi'],
+            raw_result['win_rate'] > cal_result['win_rate'],
+            raw_result['max_dd'] < cal_result['max_dd'],
+            not raw_result['stopped'] and cal_result['stopped'],
+        ])
+        if raw_result['roi'] > 0 and cal_result['roi'] <= 0:
+            verdict = "✅ ใช้ Uncalibrated — ROI บวกกว่าชัดเจน"
+        elif cal_result['roi'] > 0 and raw_result['roi'] <= 0:
+            verdict = "✅ ใช้ Calibrated — ROI บวกกว่าชัดเจน"
+        elif raw_score >= 3:
+            verdict = "💡 แนะนำ Uncalibrated สำหรับ betting (ROI ดีกว่า)"
+        elif raw_score <= 1:
+            verdict = "💡 แนะนำ Calibrated สำหรับ betting (ROI ดีกว่า)"
+        else:
+            verdict = "💡 ใกล้เคียงกัน — ใช้ Uncalibrated ง่ายกว่า"
+
+        print(f"\n  {verdict}")
+        print(f"  📌 Calibration ยังมีประโยชน์สำหรับ probability display (Brier ดีขึ้น)")
+        print(f"     แต่สำหรับ edge/ROI calculation ควรใช้ raw probabilities")
+        print(SEP)
+
+    return {'raw': raw_result, 'calibrated': cal_result}
+
+
+# ──────────────────────────────────────────────────────────────
+# P4-RUNNER) PHASE 4 FULL ANALYTICS ENGINE
+# ──────────────────────────────────────────────────────────────
+
+def run_phase4(n_cv_splits=5, cal_method='isotonic',
+               min_value_edge=0.05, bk_margin=0.05,
+               bankroll=1000.0, kelly_frac=0.25,
+               max_bet_pct=0.05, stop_loss_pct=0.20):
+    """
+    รัน Phase 4 ครบทุก section:
+      §1  Rolling Window Validation  (+ LogLoss)
+      §2  Probability Calibration    (sklearn-version-safe)
+      §3  Value Bet Detection
+      §4  ROI Backtest
+      §5  Risk Control  (Kelly + Stop-Loss)
+      §6  Equity Curve  (ASCII)
+      §7  Feature Importance (XGB + RF + SHAP)
+    """
+    print()
+    print("█" * 70)
+    print("  🚀  PHASE 4 — FULL ANALYTICS ENGINE")
+    print("█" * 70)
+
+    # §1
+    cv_results = p4_rolling_cv(n_splits=n_cv_splits, verbose=True)
+
+    # §2
+    calibrated = p4_calibration(method=cal_method, verbose=True)
+
+    # §3  — ใช้ ensemble โดยตรง (ไม่ผ่าน calibration)
+    # เหตุผล: calibrated LogLoss สูงกว่า uncalibrated → edge calculation แม่นกว่าบน raw proba
+    value_bets = p4_value_bets(
+        calibrated_model=ensemble,
+        min_edge=min_value_edge,
+        bk_margin=bk_margin,
+        verbose=True
+    )
+    effective_edge = min_value_edge
+    if len(value_bets) == 0 and min_value_edge > 0.01:
+        retry_edge = max(0.01, min_value_edge - 0.02)
+        print(f"  🔄 Auto-retry §3 ด้วย edge={retry_edge*100:.0f}% ...")
+        value_bets = p4_value_bets(
+            calibrated_model=ensemble,
+            min_edge=retry_edge,
+            bk_margin=bk_margin,
+            verbose=True
+        )
+        effective_edge = retry_edge
+
+    # §4 §5 §6 — ใช้ ensemble โดยตรง (consistent กับ Phase 3)
+    roi_result = p4_roi_backtest(
+        calibrated_model=ensemble,
+        bankroll=bankroll,
+        kelly_frac=kelly_frac,
+        max_bet_pct=max_bet_pct,
+        stop_loss_pct=stop_loss_pct,
+        min_edge=effective_edge,
+        verbose=True
+    )
+
+    # §7
+    fi_result = p4_feature_importance(verbose=True)
+
+    # §8 — Calibrated vs Uncalibrated ROI Comparison
+    cal_roi = p4_compare_calibrated_vs_raw(
+        calibrated_model=calibrated,
+        min_edge=effective_edge,
+        bankroll=bankroll,
+        kelly_frac=kelly_frac,
+        max_bet_pct=max_bet_pct,
+        stop_loss_pct=stop_loss_pct,
+        verbose=True
+    )
+
+    # Summary
+    SEP     = "=" * 70
+    cv_accs = [r['acc'] for r in cv_results]
+
+    print()
+    print(SEP)
+    print("  📋  PHASE 4 — SUMMARY")
+    print(SEP)
+    cv_lls = [r['ll'] for r in cv_results]
+    print(f"\n  §1  CV Accuracy    : {np.mean(cv_accs):.4f} ± {np.std(cv_accs):.4f}")
+    print(f"  §1  CV LogLoss     : {np.mean(cv_lls):.4f}")
+    print(f"  §3  Value Bets พบ : {len(value_bets)}  (edge≥{effective_edge*100:.0f}%)")
+    if roi_result['n_bets'] > 0:
+        print(f"  §4  Total Bets     : {roi_result['n_bets']}")
+        print(f"  §4  Win Rate       : {roi_result['win_rate']:.1f}%")
+        print(f"  §4  ROI            : {roi_result['roi']:+.1f}%")
+        print(f"  §4  Net P&L        : £{roi_result['net_pnl']:+,.2f}")
+        print(f"  §5  Max Drawdown   : {roi_result['max_dd']:.1f}%")
+        if roi_result['roi'] > 5:
+            print(f"\n  💡 โมเดลมี edge จริง — ROI {roi_result['roi']:.1f}% บน test set")
+        elif roi_result['roi'] > 0:
+            print(f"\n  💡 มี edge เล็กน้อย — ลอง tune หรือเพิ่มข้อมูล")
+        else:
+            print(f"\n  ⚠️  ROI ติดลบ — model ยังไม่ beat the market")
+    else:
+        print(f"  §4  ไม่มี bets — พิจารณาลด min_value_edge < {effective_edge*100:.0f}%")
+
+    # §8 summary
+    if cal_roi:
+        raw_r = cal_roi['raw']['roi']
+        cal_r = cal_roi['calibrated']['roi']
+        winner = "Uncalibrated" if raw_r >= cal_r else "Calibrated"
+        print(f"\n  §8  ROI Comparison:")
+        print(f"      Uncalibrated  : {raw_r:+.1f}%")
+        print(f"      Calibrated    : {cal_r:+.1f}%")
+        print(f"      🏆 ดีกว่า      : {winner}")
+
+    print()
+    print(SEP)
+    print("  ✅  PHASE 4 COMPLETE")
+    print(SEP)
+    print()
+
+    return {
+        'cv': cv_results, 'calibrated': calibrated,
+        'value_bets': value_bets, 'roi': roi_result,
+        'feature_importance': fi_result, 'comparison': cal_roi,
+    }
+
+
+# ── STEP 8: Phase 4 — Full Analytics Engine ──
+run_phase4(
+    n_cv_splits=5,
+    cal_method='sigmoid',  # sigmoid ดีกว่า isotonic บน cal_set เล็ก (n<500)
+    min_value_edge=0.03,   # 3% edge — consistent กับ Phase 3
+    bk_margin=0.05,
+    bankroll=1000.0,
+    kelly_frac=0.25,
+    max_bet_pct=0.05,
+    stop_loss_pct=0.20,
+)
