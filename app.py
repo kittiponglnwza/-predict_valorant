@@ -40,6 +40,13 @@ from sklearn.metrics import (
 from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
 from scipy.stats import poisson
 
+# ══════════════════════════════════════════════════════════════
+# CONFIG FLAGS
+# ══════════════════════════════════════════════════════════════
+
+# แกนหลัก: Football model ไม่พึ่ง market odds
+USE_MARKET_FEATURES = False
+
 # 🔥 LightGBM — core model v3.0
 try:
     import lightgbm as lgb
@@ -126,9 +133,8 @@ else:
     print("   (Add HomeXG/AwayXG columns from football-data.co.uk to unlock +2-4% accuracy)")
 
 # ══════════════════════════════════════════════════════════════
-# 🔥 PHASE 2: BETTING ODDS DETECTION
-#    ดึง B365H/B365D/B365A หรือ BbAvH/BbAvD/BbAvA เป็น features จริง
-#    implied probability = 1/odds  (normalize หลัง overround)
+# 🔥 PHASE 2: BETTING ODDS DETECTION (optional)
+#    ถ้า USE_MARKET_FEATURES=False จะปิด market ทั้งหมด
 # ══════════════════════════════════════════════════════════════
 
 def _find_odds_col(data, candidates):
@@ -137,32 +143,39 @@ def _find_odds_col(data, candidates):
             return c
     return None
 
-_odds_h = _find_odds_col(data, ['B365H','BbAvH','PSH','WHH','MaxH','AvgH'])
-_odds_d = _find_odds_col(data, ['B365D','BbAvD','PSD','WHD','MaxD','AvgD'])
-_odds_a = _find_odds_col(data, ['B365A','BbAvA','PSA','WHA','MaxA','AvgA'])
+if USE_MARKET_FEATURES:
+    _odds_h = _find_odds_col(data, ['B365H','BbAvH','PSH','WHH','MaxH','AvgH'])
+    _odds_d = _find_odds_col(data, ['B365D','BbAvD','PSD','WHD','MaxD','AvgD'])
+    _odds_a = _find_odds_col(data, ['B365A','BbAvA','PSA','WHA','MaxA','AvgA'])
 
-ODDS_AVAILABLE = all(x is not None for x in [_odds_h, _odds_d, _odds_a])
+    ODDS_AVAILABLE = all(x is not None for x in [_odds_h, _odds_d, _odds_a])
 
-if ODDS_AVAILABLE:
-    data['_OddsH'] = pd.to_numeric(data[_odds_h], errors='coerce')
-    data['_OddsD'] = pd.to_numeric(data[_odds_d], errors='coerce')
-    data['_OddsA'] = pd.to_numeric(data[_odds_a], errors='coerce')
-    # Implied probabilities (normalize to remove overround)
-    _raw_h = 1 / data['_OddsH']
-    _raw_d = 1 / data['_OddsD']
-    _raw_a = 1 / data['_OddsA']
-    _total = (_raw_h + _raw_d + _raw_a).replace(0, np.nan)
-    data['_ImpH'] = _raw_h / _total   # implied P(Home Win) — overround removed
-    data['_ImpD'] = _raw_d / _total
-    data['_ImpA'] = _raw_a / _total
-    data['_Overround'] = (_raw_h + _raw_d + _raw_a) - 1  # bookmaker margin
-    print(f"✅ Betting odds found: {_odds_h}/{_odds_d}/{_odds_a}  "
-          f"(avg overround {data['_Overround'].mean()*100:.1f}%)")
+    if ODDS_AVAILABLE:
+        data['_OddsH'] = pd.to_numeric(data[_odds_h], errors='coerce')
+        data['_OddsD'] = pd.to_numeric(data[_odds_d], errors='coerce')
+        data['_OddsA'] = pd.to_numeric(data[_odds_a], errors='coerce')
+        # Implied probabilities (normalize to remove overround)
+        _raw_h = 1 / data['_OddsH']
+        _raw_d = 1 / data['_OddsD']
+        _raw_a = 1 / data['_OddsA']
+        _total = (_raw_h + _raw_d + _raw_a).replace(0, np.nan)
+        data['_ImpH'] = _raw_h / _total   # implied P(Home Win) — overround removed
+        data['_ImpD'] = _raw_d / _total
+        data['_ImpA'] = _raw_a / _total
+        data['_Overround'] = (_raw_h + _raw_d + _raw_a) - 1  # bookmaker margin
+        print(f"✅ Betting odds found: {_odds_h}/{_odds_d}/{_odds_a}  "
+              f"(avg overround {data['_Overround'].mean()*100:.1f}%)")
+    else:
+        ODDS_AVAILABLE = False
+        data['_ImpH'] = np.nan; data['_ImpD'] = np.nan; data['_ImpA'] = np.nan
+        data['_Overround'] = np.nan
+        print("⚠️  Betting odds NOT found — market features will be skipped")
+        print("   (Add B365H/B365D/B365A from football-data.co.uk to improve calibration + ROI)")
 else:
+    ODDS_AVAILABLE = False
     data['_ImpH'] = np.nan; data['_ImpD'] = np.nan; data['_ImpA'] = np.nan
     data['_Overround'] = np.nan
-    print("⚠️  Betting odds NOT found — market features will be skipped")
-    print("   (Add B365H/B365D/B365A from football-data.co.uk to improve calibration + ROI)")
+    print("ℹ️  USE_MARKET_FEATURES=False — ปิดการใช้ market odds ทั้งหมด")
 
 # ══════════════════════════════════════════════════════════════
 # 2) ELO RATING — Dynamic K-factor (ใหม่)
@@ -619,12 +632,11 @@ if XG_AVAILABLE:
     print("✅ xG match-level features computed")
 
 # ══════════════════════════════════════════════════════════════
-# 🔥 PHASE 2: BETTING MARKET FEATURES (ถ้า odds พร้อม)
-#    implied probability = market consensus (เก่งกว่า model ส่วนใหญ่)
-#    ใช้เป็น feature → model เรียนรู้ "bias" ของตลาด
+# 🔥 PHASE 2: BETTING MARKET FEATURES (ถ้า odds พร้อม และเปิดใช้ market)
+#    implied probability = market consensus
 # ══════════════════════════════════════════════════════════════
 
-if ODDS_AVAILABLE:
+if USE_MARKET_FEATURES and ODDS_AVAILABLE:
     # implied prob ตรงๆ
     match_df['Mkt_ImpH']    = match_df['_ImpH']
     match_df['Mkt_ImpD']    = match_df['_ImpD']
@@ -764,33 +776,106 @@ if XG_AVAILABLE:
     FEATURES += [f for f in _XG_FEATURES if f in match_df.columns]
     print(f"✅ Phase 1 xG: +{len([f for f in _XG_FEATURES if f in match_df.columns])} features")
 
-# 🔥 PHASE 2: เพิ่ม Betting Market features ถ้า dataset มี odds
+# 🔥 PHASE 2: เพิ่ม Betting Market features ถ้า dataset มี odds และเปิดใช้ market
 _MKT_FEATURES = [
     'Mkt_ImpH', 'Mkt_ImpD', 'Mkt_ImpA',
     'Mkt_Spread', 'Mkt_DrawPrem', 'Mkt_Overround',
 ]
-if ODDS_AVAILABLE:
+if USE_MARKET_FEATURES and ODDS_AVAILABLE:
     FEATURES += [f for f in _MKT_FEATURES if f in match_df.columns]
     print(f"✅ Phase 2 Market: +{len([f for f in _MKT_FEATURES if f in match_df.columns])} features")
 
 # กรอง features ที่มีอยู่จริงใน match_df เท่านั้น (safety net)
 FEATURES = [f for f in FEATURES if f in match_df.columns]
+
+# ══════════════════════════════════════════════════════════════
+# 🔥 FIX 4: ตัด Low-Importance Features (จาก SHAP analysis)
+#    ลด features จาก 95 → ~88 ตัว เพื่อลด noise + overfitting
+#    จาก SHAP: H_CS5, A_CS5, Diff_CS, Diff_Scored,
+#              H_Draw5, H2H_DrawRate, H2H_HomeWinRate มี importance ต่ำสุด
+# ══════════════════════════════════════════════════════════════
+
+LOW_IMPORTANCE_FEATURES = [
+    'H_CS5', 'A_CS5',           # Clean sheet — ซ้ำซ้อนกับ GA/DefStr features
+    'Diff_CS',                   # Derived จาก CS5 ที่ตัดไปแล้ว
+    'Diff_Scored',               # ซ้ำกับ Diff_AttackIdx + Diff_GF
+    'H_Draw5',                   # Draw rate รายทีม — sample เล็ก, noisy
+    'H2H_DrawRate',              # H2H sample เล็กมาก (< 10 นัดส่วนใหญ่)
+    'H2H_HomeWinRate',           # H2H — เช่นกัน sample น้อย
+]
+
+FEATURES_PRUNED = [f for f in FEATURES if f not in LOW_IMPORTANCE_FEATURES]
 print(f"✅ Features v5.0: {len(FEATURES)} ตัว  "
       f"(xG={'✅' if XG_AVAILABLE else '❌'}  Market={'✅' if ODDS_AVAILABLE else '❌'})")
+print(f"✅ Features v5.1 (pruned): {len(FEATURES_PRUNED)} ตัว  (-{len(FEATURES)-len(FEATURES_PRUNED)} low-importance)")
+
+# ใช้ pruned version เป็น default
+FEATURES = FEATURES_PRUNED
 
 # ══════════════════════════════════════════════════════════════
 # 11) TIME-BASED SPLIT
 # ══════════════════════════════════════════════════════════════
 
-match_df_clean = match_df.dropna(subset=FEATURES + ['Result3']).reset_index(drop=True)
+# เลือก CORE_FEATURES จาก columns ที่แทบไม่มี NaN เพื่อไม่ให้ทิ้งแมตช์เยอะเกินไป
+core_feature_threshold = 0.95
+core_feature_stats = match_df[FEATURES].notna().mean()
+CORE_FEATURES = [f for f in FEATURES if core_feature_stats.get(f, 0) >= core_feature_threshold]
 
-split_date = match_df_clean['Date_x'].quantile(0.8)
-train = match_df_clean[match_df_clean['Date_x'] <= split_date]
-test  = match_df_clean[match_df_clean['Date_x'] > split_date]
+if len(CORE_FEATURES) < 20:
+    # safety fallback: ถ้าเลือกได้น้อยเกินไป ให้ใช้ FEATURES ทั้งหมด แต่พิมพ์เตือน
+    CORE_FEATURES = FEATURES.copy()
+    print("⚠️  CORE_FEATURES coverage ต่ำ — fallback ใช้ FEATURES ทั้งหมดสำหรับ dropna")
+else:
+    print(f"✅ CORE_FEATURES selected: {len(CORE_FEATURES)} / {len(FEATURES)} "
+          f"(>= {core_feature_threshold*100:.0f}% non-NaN)")
 
-X_train = train[FEATURES]
+match_df_clean = match_df.dropna(subset=CORE_FEATURES + ['Result3']).reset_index(drop=True)
+print(f"✅ match_df_clean rows after CORE_FEATURES dropna: {len(match_df_clean)} จากทั้งหมด {len(match_df)}")
+
+# ══════════════════════════════════════════════════════════════
+# 🔥 FIX 1+2: SEASON-BASED SPLIT (แทน quantile 80/20)
+#    Season = Aug → Jul ปีถัดไป
+#    Train: ทุก season ก่อน TEST_SEASON
+#    Test : TEST_SEASON เต็มซีซั่น (≥380 นัด)
+#    → test set ใหญ่กว่าเดิม 6× และ reflect ความเป็นจริง
+# ══════════════════════════════════════════════════════════════
+
+def get_season(date):
+    """Aug-Dec → season=year, Jan-Jul → season=year-1"""
+    if pd.isna(date): return np.nan
+    return date.year if date.month >= 8 else date.year - 1
+
+match_df_clean['Season'] = match_df_clean['Date_x'].apply(get_season)
+
+# หา season ที่จบแล้ว (ไม่ใช่ปัจจุบัน) และมีนัดพอ
+season_counts = match_df_clean.groupby('Season').size()
+completed_seasons = season_counts[season_counts >= 200].index.tolist()
+completed_seasons = sorted([s for s in completed_seasons if s < get_season(TODAY)])
+
+if len(completed_seasons) >= 2:
+    # ใช้ season ล่าสุดที่จบแล้วเป็น test
+    TEST_SEASON  = completed_seasons[-1]
+    TRAIN_SEASON = completed_seasons[:-1]   # ทุก season ก่อนหน้า
+    train = match_df_clean[match_df_clean['Season'].isin(TRAIN_SEASON)]
+    test  = match_df_clean[match_df_clean['Season'] == TEST_SEASON]
+    print(f"\n✅ Season-Based Split (FIX 1+2):")
+    print(f"   Train seasons : {sorted(TRAIN_SEASON)}  ({len(train)} matches)")
+    print(f"   Test season   : {TEST_SEASON}           ({len(test)} matches)")
+else:
+    # fallback: index-based 80/20 split (ใช้ข้อมูลทั้งหมด ~3,000+ นัดสำหรับ train)
+    sorted_df = match_df_clean.sort_values('Date_x').reset_index(drop=True)
+    split_idx = int(len(sorted_df) * 0.8)
+    train = sorted_df.iloc[:split_idx].copy()
+    test  = sorted_df.iloc[split_idx:].copy()
+    TEST_SEASON  = None
+    TRAIN_SEASON = None
+    print(f"\n⚠️  Season-based split ใช้ไม่ได้ — fallback เป็น index 80/20")
+    print(f"   Train matches : {len(train)}")
+    print(f"   Test  matches : {len(test)}")
+
+X_train = train[FEATURES].fillna(0)
 y_train = train['Result3']
-X_test  = test[FEATURES]
+X_test  = test[FEATURES].fillna(0)
 y_test  = test['Result3']
 
 print(f"\nTrain: {len(train)}  |  Test: {len(test)}")
@@ -1279,11 +1364,6 @@ def build_match_row(home_team, away_team, match_date=None):
         'A_xAttackIdx':  a.get('xGF_ewm', np.nan) / (max(h.get('xGA_ewm', 0.3) or 0.3, 0.3) + 0.01) if XG_AVAILABLE else np.nan,
         'Diff_xAttackIdx': (h.get('xGF_ewm', np.nan) / (max(a.get('xGA_ewm', 0.3) or 0.3, 0.3) + 0.01) -
                             a.get('xGF_ewm', np.nan) / (max(h.get('xGA_ewm', 0.3) or 0.3, 0.3) + 0.01)) if XG_AVAILABLE else np.nan,
-        # 🔥 Phase 2: Market features (ถ้าไม่มี odds → NaN)
-        # หมายเหตุ: สำหรับ predict_match ไม่มี live odds → ใส่ NaN
-        # ถ้าต้องการ feed odds เข้า → ส่ง implied_h/d/a เป็น parameter
-        'Mkt_ImpH': np.nan, 'Mkt_ImpD': np.nan, 'Mkt_ImpA': np.nan,
-        'Mkt_Spread': np.nan, 'Mkt_DrawPrem': np.nan, 'Mkt_Overround': np.nan,
     }
     return row
 
@@ -1309,8 +1389,8 @@ def predict_match(home_team, away_team, match_date=None,
 
     row  = build_match_row(home_team, away_team, match_date)
 
-    # 🔥 Phase 2: ถ้าส่ง live odds มา → override market features
-    if all(x is not None for x in [odds_home, odds_draw, odds_away]):
+    # 🔥 Phase 2: ถ้าส่ง live odds มา → override market features (เฉพาะเมื่อ USE_MARKET_FEATURES=True)
+    if USE_MARKET_FEATURES and all(x is not None for x in [odds_home, odds_draw, odds_away]):
         try:
             rh, rd, ra = 1/odds_home, 1/odds_draw, 1/odds_away
             total = rh + rd + ra
@@ -2490,19 +2570,27 @@ def rolling_window_cv(n_splits=5, verbose=True):
 # ══════════════════════════════════════════════════════════════
 
 def backtest_roi(bankroll=1000.0, min_edge=0.03, kelly_fraction=0.25,
-                 max_exposure=0.05, verbose=True):
+                 max_exposure=0.05, verbose=True, odds_shrink=0.0,
+                 mode='closing'):
     """
     🔥 v3.0 Kelly Criterion Betting Strategy
     - Full Kelly sizing with fraction
     - min_edge: ต้องมี edge > X% ถึงเดิมพัน
     - max_exposure: จำกัด % bankroll ต่อแมตช์ (risk management)
     - แสดง edge distribution + per-outcome ROI
+
+    🔥 FIX 3: Opening odds stress test
+    - mode='closing'     : ใช้ B365 odds (closing) — optimistic
+    - mode='conservative': shrink implied prob 5% เพื่อ simulate opening odds
+    - mode='max_odds'    : ใช้ Max odds ถ้ามี (worst-case for edge)
+    - odds_shrink=0.05   : ลด edge ลง 5% สำหรับ conservative estimate
     """
     SEP  = "=" * 65
     LINE = "─" * 65
     if verbose:
+        mode_tag = f"[{mode}{'  shrink='+str(odds_shrink) if odds_shrink>0 else ''}]"
         print(f"\n{SEP}")
-        print(f"  💰  KELLY CRITERION BACKTEST (v3.0)")
+        print(f"  💰  KELLY CRITERION BACKTEST (v3.0) {mode_tag}")
         print(f"  Bankroll: £{bankroll:,.0f} | Min Edge: {min_edge*100:.0f}% | "
               f"Kelly: {kelly_fraction*100:.0f}% | Max: {max_exposure*100:.0f}%/bet")
         print(SEP)
@@ -2511,20 +2599,50 @@ def backtest_roi(bankroll=1000.0, min_edge=0.03, kelly_fraction=0.25,
     proba_test = proba_hybrid   # ← use hybrid (Poisson blended) if available
     label_map  = {0: 'Away Win', 1: 'Draw', 2: 'Home Win'}
 
-    # 🔥 Phase 2: ดึง real odds ถ้ามี (เทียบกับ model proba ได้จริง)
+    # 🔥 FIX 3: ดึง odds จาก market ตาม mode ที่เลือก (ถ้าเปิดใช้ market เท่านั้น)
     real_odds_test = None
-    if ODDS_AVAILABLE and '_ImpH' in test.columns:
+    if USE_MARKET_FEATURES and ODDS_AVAILABLE and '_ImpH' in test.columns:
         try:
-            oh = test['_ImpH'].values  # implied prob home
-            od = test['_ImpD'].values
-            oa = test['_ImpA'].values
+            # 🔥 FIX 3a: ลองใช้ Max odds ก่อน (ถ้ามี) — เป็น worst-case สำหรับ edge
+            _max_h = _find_odds_col(data, ['MaxH','BbMxH'])
+            _max_d = _find_odds_col(data, ['MaxD','BbMxD'])
+            _max_a = _find_odds_col(data, ['MaxA','BbMxA'])
+            use_max = (mode == 'max_odds' and
+                       all(x is not None for x in [_max_h, _max_d, _max_a]))
+
+            if use_max:
+                # Merge max odds into test
+                max_odds_df = data[['MatchID',_max_h,_max_d,_max_a]].copy()
+                test_with_max = test.merge(max_odds_df, on='MatchID', how='left')
+                oh = 1 / pd.to_numeric(test_with_max[_max_h], errors='coerce').fillna(3)
+                od = 1 / pd.to_numeric(test_with_max[_max_d], errors='coerce').fillna(3)
+                oa = 1 / pd.to_numeric(test_with_max[_max_a], errors='coerce').fillna(3)
+                print(f"  📌 Using Max odds (worst-case edge) 🔥")
+            else:
+                # ใช้ implied prob จาก B365 (closing odds)
+                oh = test['_ImpH'].values
+                od = test['_ImpD'].values
+                oa = test['_ImpA'].values
+
+            # 🔥 FIX 3b: Conservative mode — simulate opening odds โดย shrink implied prob
+            # Closing odds efficient กว่า opening ~3-7%
+            # ถ้า shrink=0.05 → reduce edge by 5% → simulate opening odds impact
+            if odds_shrink > 0 and not use_max:
+                total_imp = oh + od + oa
+                # เพิ่ม overround ขึ้น (แย่กว่าสำหรับ bettor)
+                oh = oh + odds_shrink * oh / total_imp
+                od = od + odds_shrink * od / total_imp
+                oa = oa + odds_shrink * oa / total_imp
+                print(f"  ⚠️  Conservative mode: odds shrunk by {odds_shrink*100:.0f}% (simulate opening)")
+
             # Convert implied prob → decimal odds
             real_odds_test = np.column_stack([
-                np.where(oa > 0.01, 1/oa, 99),  # away odds (cls 0)
-                np.where(od > 0.01, 1/od, 99),  # draw odds (cls 1)
-                np.where(oh > 0.01, 1/oh, 99),  # home odds (cls 2)
+                np.where(oa > 0.01, 1/oa, 99),   # away odds (cls 0)
+                np.where(od > 0.01, 1/od, 99),   # draw odds (cls 1)
+                np.where(oh > 0.01, 1/oh, 99),   # home odds (cls 2)
             ])
-            print(f"  ✅ Using real bookmaker odds for backtest (Phase 2) 🔥")
+            odds_source = "Max odds" if use_max else ("Conservative B365" if odds_shrink > 0 else "B365 closing")
+            print(f"  ✅ Using {odds_source} for backtest (Phase 2) 🔥")
         except Exception as e:
             print(f"  ⚠️  Real odds extraction failed: {e} — using simulated")
             real_odds_test = None
@@ -2691,28 +2809,39 @@ def walk_forward_season_cv(verbose=True):
         print(SEP)
 
     cv_df = match_df_clean.copy()
-    cv_df['Year'] = cv_df['Date_x'].dt.year
 
-    years = sorted(cv_df['Year'].unique())
-    # ต้องมี training data อย่างน้อย 3 ปี
-    test_years = [y for y in years if y >= years[min(3, len(years)-1)]]
+    # 🔥 FIX 2: ใช้ Season (Aug→Jul) แทน Calendar Year
+    #    Season 2023 = Aug 2023 – Jul 2024 ≈ 380 นัด (ไม่ใช่แค่ Jan-Dec)
+    if 'Season' not in cv_df.columns:
+        cv_df['Season'] = cv_df['Date_x'].apply(get_season)
 
-    if len(test_years) == 0:
+    seasons = sorted(cv_df['Season'].dropna().unique())
+    # ต้องมี training data อย่างน้อย 3 seasons
+    min_train_seasons = 3
+    test_seasons = [s for s in seasons[min_train_seasons:] if not pd.isna(s)]
+
+    if len(test_seasons) == 0:
         print("  ⚠️  ไม่มีข้อมูลเพียงพอสำหรับ walk-forward CV")
         return []
 
     fold_results = []
     if verbose:
-        print(f"\n  {'Year':<8} {'Train':>8} {'Test':>7} {'Acc':>8} {'Draw-F1':>9} {'LogLoss':>9}")
+        print(f"\n  {'Season':<10} {'Train':>8} {'Test':>7} {'Acc':>8} {'Draw-F1':>9} {'LogLoss':>9}")
         print(f"  {LINE}")
 
-    for test_year in test_years:
-        train_mask = cv_df['Year'] < test_year
-        test_mask  = cv_df['Year'] == test_year
-        # 🔥 S2: ข้าม year ที่ test set เล็กเกินไป (< 100 แมตช์)
-        if train_mask.sum() < 100 or test_mask.sum() < 100:
-            if test_mask.sum() > 0:
-                print(f"  ⏭️  Skip {test_year} — test too small ({test_mask.sum()} matches)")
+    for test_season in test_seasons:
+        train_mask = cv_df['Season'] < test_season
+        test_mask  = cv_df['Season'] == test_season
+
+        n_train = train_mask.sum()
+        n_test  = test_mask.sum()
+
+        # 🔥 FIX 2: เพิ่ม min threshold เป็น 200 นัด (เต็ม season ≈ 380)
+        MIN_TEST_MATCHES = 200
+        if n_train < 200 or n_test < MIN_TEST_MATCHES:
+            if n_test > 0 and verbose:
+                print(f"  ⏭️  Skip {test_season} — {'train' if n_train<200 else 'test'} too small "
+                      f"({n_train} train, {n_test} test — need {MIN_TEST_MATCHES}+ each)")
             continue
 
         X_tr = cv_df.loc[train_mask, FEATURES].values
@@ -2747,13 +2876,12 @@ def walk_forward_season_cv(verbose=True):
         draw_f1 = rep.get('1', {}).get('f1-score', 0)
 
         fold_results.append({
-            'year': test_year, 'train_size': train_mask.sum(),
-            'test_size': test_mask.sum(), 'acc': a,
+            'year': test_season, 'train_size': n_train,
+            'test_size': n_test, 'acc': a,
             'draw_f1': draw_f1, 'logloss': ll
         })
         if verbose:
-            model_tag = "LGBM" if LGBM_AVAILABLE else "GBT"
-            print(f"  {test_year:<8} {train_mask.sum():>8} {test_mask.sum():>7} "
+            print(f"  {str(test_season):<10} {n_train:>8} {n_test:>7} "
                   f"{a:>8.4f} {draw_f1:>9.4f} {ll:>9.4f}")
 
     if fold_results and verbose:
@@ -2891,6 +3019,134 @@ def analyze_league_regimes(top_n=6):
 # 27) PHASE 3 (CV + ROI + Calibration + Walk-Forward)
 # ══════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════
+# 🔥 FIX 5: MARKET ABLATION TEST
+#    เปรียบเทียบ model ที่มีและไม่มี market features
+#    ถ้า accuracy ดรอปมาก → โมเดลแค่ "เรียน odds"
+#    ถ้า accuracy ดรอปน้อย → โมเดลมี football intelligence แท้จริง
+# ══════════════════════════════════════════════════════════════
+
+def run_market_ablation_test(verbose=True):
+    """
+    Ablation test: train 3 versions และ compare accuracy บน test set
+    1) Full features (with market)
+    2) No market features
+    3) No xG features
+    """
+    SEP  = "=" * 65
+    LINE = "─" * 65
+    if verbose:
+        print(f"\n{SEP}")
+        print(f"  🔬  MARKET ABLATION TEST (FIX 5)")
+        print(f"  ทดสอบว่า edge มาจาก Market Odds หรือ Football Features จริง")
+        print(SEP)
+
+    if not LGBM_AVAILABLE:
+        print("  ⚠️  LightGBM ไม่พร้อม — ข้าม ablation test")
+        return None
+
+    MKT_FEATURES = ['Mkt_ImpH', 'Mkt_ImpD', 'Mkt_ImpA',
+                     'Mkt_Spread', 'Mkt_DrawPrem', 'Mkt_Overround']
+    XG_FEAT_LIST = [f for f in FEATURES if any(k in f for k in
+                    ['xGF', 'xGA', 'xGD', 'xG_over', 'xAttack', 'xGF_slope'])]
+
+    features_no_mkt = [f for f in FEATURES if f not in MKT_FEATURES]
+    features_no_xg  = [f for f in FEATURES if f not in XG_FEAT_LIST]
+    features_base   = [f for f in FEATURES
+                       if f not in MKT_FEATURES and f not in XG_FEAT_LIST]
+
+    ablation_params = {
+        'n_estimators': 300, 'learning_rate': 0.05, 'max_depth': 5,
+        'num_leaves': 25, 'class_weight': 'balanced',
+        'random_state': 42, 'n_jobs': -1, 'verbose': -1
+    }
+
+    results = {}
+    configs = [
+        ('Full (Market+xG)',     FEATURES),
+        ('No Market Features',   features_no_mkt),
+        ('No xG Features',       features_no_xg),
+        ('Base Only (No Mkt/xG)',features_base),
+    ]
+
+    if verbose:
+        print(f"\n  {'Config':<28} {'Features':>10} {'Test Acc':>10} {'Draw F1':>9}")
+        print(f"  {LINE}")
+
+    for name, feat_list in configs:
+        if len(feat_list) < 5:
+            if verbose: print(f"  {name:<28} {'skip — too few features':>30}")
+            continue
+        try:
+            X_tr_ab = train[feat_list].fillna(0).values
+            X_te_ab = test[feat_list].fillna(0).values
+            y_tr_ab = train['Result3'].values
+            y_te_ab = test['Result3'].values
+
+            sc_ab = StandardScaler()
+            X_tr_sc_ab = sc_ab.fit_transform(X_tr_ab)
+            X_te_sc_ab = sc_ab.transform(X_te_ab)
+
+            mdl = lgb.LGBMClassifier(**ablation_params)
+            mdl.fit(X_tr_sc_ab, y_tr_ab)
+            pred_ab = mdl.predict(X_te_sc_ab)
+
+            acc_ab = accuracy_score(y_te_ab, pred_ab)
+            rep_ab = classification_report(y_te_ab, pred_ab, output_dict=True, zero_division=0)
+            draw_f1_ab = rep_ab.get('1', {}).get('f1-score', 0)
+
+            results[name] = {'acc': acc_ab, 'draw_f1': draw_f1_ab, 'n_features': len(feat_list)}
+
+            marker = ''
+            if 'Full' in name: marker = ' ← baseline'
+            elif results.get('Full (Market+xG)'):
+                drop = results['Full (Market+xG)']['acc'] - acc_ab
+                marker = f' (drop {drop:+.1%})'
+
+            if verbose:
+                print(f"  {name:<28} {len(feat_list):>10} {acc_ab:>10.1%} {draw_f1_ab:>9.3f}{marker}")
+
+        except Exception as e:
+            if verbose: print(f"  {name:<28} Error: {e}")
+
+    if verbose and len(results) >= 2:
+        print(f"\n  {LINE}")
+        full_acc  = results.get('Full (Market+xG)', {}).get('acc', 0)
+        nomkt_acc = results.get('No Market Features', {}).get('acc', 0)
+        base_acc  = results.get('Base Only (No Mkt/xG)', {}).get('acc', 0)
+
+        market_contribution = full_acc - nomkt_acc
+        xg_contribution     = results.get('No xG Features', {}).get('acc', 0)
+        xg_contribution     = full_acc - xg_contribution if xg_contribution else 0
+
+        print(f"\n  📊 Feature Contribution Analysis:")
+        print(f"     Market features contribution : {market_contribution:+.1%}")
+        print(f"     xG features contribution     : {xg_contribution:+.1%}")
+        print(f"     Base (Elo+Form) accuracy     : {base_acc:.1%}")
+
+        print(f"\n  🎯 Verdict:")
+        if market_contribution > 0.05:
+            print(f"     ❌ Edge มาจาก Market Odds เป็นหลัก (>{market_contribution:.0%})")
+            print(f"        → ROI backtest มีโอกาส overestimate ถ้าใช้ closing odds")
+            print(f"        → ต้องพิสูจน์ด้วย opening odds หรือ in-play edge")
+        elif market_contribution > 0.02:
+            print(f"     🟡 Market ช่วย moderate ({market_contribution:.0%})")
+            print(f"        → โมเดลมีทั้ง football + market signal")
+        else:
+            print(f"     ✅ Model มี football intelligence แท้ ({market_contribution:.0%} from market)")
+            print(f"        → ROI น่าเชื่อถือมากขึ้น")
+
+        print(SEP)
+
+    return {
+        'with_mkt': results.get('Full (Market+xG)', {}).get('acc', 0),
+        'no_mkt':   results.get('No Market Features', {}).get('acc', 0),
+        'no_xg':    results.get('No xG Features', {}).get('acc', 0),
+        'base':     results.get('Base Only (No Mkt/xG)', {}).get('acc', 0),
+        'details':  results
+    }
+
+
 def run_phase3(n_simulations=1000):
     print(f"\n{'█'*65}")
     print(f"  🏆  PHASE 3 — PRODUCTION GRADE v3.0")
@@ -2899,8 +3155,50 @@ def run_phase3(n_simulations=1000):
     cv_results  = rolling_window_cv(n_splits=5)
     wf_results  = walk_forward_season_cv()          # 🔥 NEW: Walk-Forward
     roi_result  = backtest_roi(bankroll=1000.0, min_edge=0.03, kelly_fraction=0.25)
+
+    # 🔥 FIX 3: Backtest เพิ่ม conservative + max_odds mode (เฉพาะเมื่อใช้ market)
+    if USE_MARKET_FEATURES and ODDS_AVAILABLE:
+        print(f"\n{'─'*65}")
+        print(f"  🔬  STRESS TEST: Opening Odds Simulation (FIX 3)")
+        print(f"{'─'*65}")
+        roi_conservative = backtest_roi(
+            bankroll=1000.0, min_edge=0.03, kelly_fraction=0.25,
+            mode='conservative', odds_shrink=0.05,
+            verbose=True
+        )
+        roi_max = backtest_roi(
+            bankroll=1000.0, min_edge=0.03, kelly_fraction=0.25,
+            mode='max_odds', verbose=True
+        )
+        print(f"\n  📊 Backtest Comparison (FIX 3):")
+        print(f"  {'Mode':<30} {'ROI':>8}  {'WinRate':>9}  {'Bets':>6}")
+        print(f"  {'─'*56}")
+        for tag, r in [
+            ("Closing B365 (optimistic)", roi_result),
+            ("Conservative -5% (opening)", roi_conservative),
+            ("Max odds (worst-case)", roi_max),
+        ]:
+            if r:
+                print(f"  {tag:<30} {r['roi']:>+7.1f}%  {r['win_rate']:>8.1f}%  {r['total_bets']:>6}")
+        verdict = ""
+        if roi_conservative and roi_conservative['roi'] > 5:
+            verdict = "✅ Edge ยังคงอยู่แม้ conservative → edge จริง"
+        elif roi_conservative and roi_conservative['roi'] > 0:
+            verdict = "🟡 Edge อ่อนลงมาก → อาจมาจาก closing odds advantage บางส่วน"
+        elif roi_conservative:
+            verdict = "❌ Edge หายไปใน conservative → edge มาจาก closing odds เป็นหลัก"
+        if verdict:
+            print(f"\n  💡 {verdict}")
+
     mc_results  = run_monte_carlo(n_simulations=n_simulations)
     regime_data = analyze_league_regimes(top_n=6)  # 🔥 NEW: Regime Detection
+
+    # ══════════════════════════════════════════════════════════════
+    # 🔥 FIX 5: NO-MARKET ABLATION TEST
+    #    train โมเดลใหม่โดยไม่มี market features
+    #    ถ้า accuracy ดรอป > 5% → edge มาจาก odds เป็นหลัก
+    # ══════════════════════════════════════════════════════════════
+    ablation_result = run_market_ablation_test()
 
     SEP = "=" * 65
     cv_accs = [r['acc'] for r in cv_results]
@@ -2923,8 +3221,23 @@ def run_phase3(n_simulations=1000):
         print(f"     Win Rate       : {roi_result['win_rate']:.1f}%")
         print(f"     Max Drawdown   : {roi_result['max_dd']:.1f}%")
         print(f"     Total Bets     : {roi_result['total_bets']:,}")
+
+    if ablation_result:
+        print(f"\n  🔬 Market Ablation Test (FIX 5)")
+        print(f"     With Market    : {ablation_result['with_mkt']:.1%}")
+        print(f"     No Market      : {ablation_result['no_mkt']:.1%}")
+        drop = ablation_result['with_mkt'] - ablation_result['no_mkt']
+        print(f"     Market Contribution: {drop:+.1%}")
+        if drop > 0.05:
+            print(f"     ⚠️  Edge มาจาก market odds เป็นหลัก (drop > 5%)")
+        elif drop > 0.02:
+            print(f"     🟡 Market ช่วย moderate (drop 2-5%)")
+        else:
+            print(f"     ✅ Model มี football intelligence แท้ (drop < 2%)")
+
     print(f"\n{SEP}\n  ✅  PHASE 3 COMPLETE\n{SEP}\n")
-    return {'cv': cv_results, 'walk_forward': wf_results, 'roi': roi_result, 'mc': mc_results}
+    return {'cv': cv_results, 'walk_forward': wf_results, 'roi': roi_result, 'mc': mc_results,
+            'ablation': ablation_result}
 
 
 # ══════════════════════════════════════════════════════════════
