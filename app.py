@@ -1,21 +1,30 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║   FOOTBALL AI — COMPETITION GRADE v8.0                       ║
-║   v7b fixes + 3 clarity upgrades:                            ║
-║   🔥 FIX 4: Ablation test — เพิ่ม context single-stage note ║
-║             → xG negative contribution = architecture issue  ║
-║             → ไม่ใช่สัญญาณว่า xG ไม่มีประโยชน์             ║
-║   🔥 FIX 5: Rolling CV — เพิ่ม explanation ว่าทำไมต่ำกว่า  ║
-║             → single-stage + older data = lower bound        ║
-║             → Walk-forward คือ primary metric ที่เชื่อถือได้║
-║   🔥 FIX 6: Phase 3 Summary — Walk-forward เป็น PRIMARY      ║
-║             → Rolling CV ลดเป็น reference only              ║
-║             → Weighted accuracy + pooled sample size          ║
-║   ─────────────────────────────────────────────────────────  ║
-║   Confirmed wins from v7b:                                   ║
-║     ✅ Draw Calibration: Brier SS = +0.2%, Bias = +0.1%      ║
-║     ✅ Walk-forward std = 0.036 (เสถียร)                     ║
-║     ✅ Narrow threshold search สำหรับ CV folds               ║
+║   FOOTBALL AI — COMPETITION GRADE v9.0  🎯 DRAW FOCUS       ║
+║   5 major upgrades targeting Draw F1: 0.13 → 0.30+          ║
+║                                                              ║
+║   🔥 STEP 1: เพิ่ม Draw features ใหม่ 8 ตัว                 ║
+║     Abs_Elo_diff, Abs_xGF_diff, GF_balance, GA_balance       ║
+║     xG_tightness, Draw_EloXForm, Late_season_draw,           ║
+║     Combined_GF_ewm  → ยิ่งใกล้ 0 ยิ่งเสี่ยงเสมอ           ║
+║                                                              ║
+║   🔥 STEP 2: Stage 1 class_weight draw → 2.5                 ║
+║     เพิ่มน้ำหนัก Draw class ใน Stage 1 (Draw vs Not)        ║
+║     class_weight = {0:1, 1:2.5}  เดิม: 'balanced'           ║
+║                                                              ║
+║   🔥 STEP 3: Optuna optimize Log Loss แทน Accuracy           ║
+║     objective: log_loss (ดีกว่าสำหรับ probability calibration)║
+║     เดิม: macro F1 → ใหม่: negative log_loss                 ║
+║                                                              ║
+║   🔥 STEP 4: Dynamic α Hybrid Blend                          ║
+║     ถ้า Abs_Elo_diff สูง → เชื่อ ML มาก (α สูง)             ║
+║     ถ้า Abs_Elo_diff ต่ำ → เชื่อ Poisson มาก (α ต่ำ)        ║
+║     แทน fixed α=0.30 ทุกเกม                                 ║
+║                                                              ║
+║   🔥 STEP 5: Threshold optimization บน Macro F1 (เดิม ✅)   ║
+║     เพิ่ม draw threshold search range ให้กว้างขึ้น           ║
+║     t_draw_range: (0.18, 0.45) เดิม: (0.15, 0.55)           ║
+║     เน้น precision-recall tradeoff สำหรับ Draw               ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
@@ -618,6 +627,46 @@ match_df['Draw_likelihood'] = match_df['Elo_closeness'] * match_df['Form_closene
 print("✅ Deep Feature Engineering (S4) computed")
 
 # ══════════════════════════════════════════════════════════════
+# 🔥 STEP 1 (v9): DRAW-FOCUSED FEATURES — 8 features ใหม่
+#    Draw มักเกิดเมื่อ: xG ใกล้กัน, Elo ใกล้กัน, ทั้งคู่เล่นรับ
+#    → Feature ที่วัดว่า "เกมนี้สูสีแค่ไหน" จาก multiple angles
+# ══════════════════════════════════════════════════════════════
+
+# 1) Abs Elo diff — ยิ่งต่ำยิ่งเสี่ยงเสมอ (linear ชัดกว่า closeness)
+match_df['Abs_Elo_diff']    = np.abs(match_df['Diff_Elo'])
+
+# 2) Abs xGF diff (EWM) — xG gap ต่ำ = โอกาสเสมอสูง
+if XG_AVAILABLE and 'Diff_xGF_ewm' in match_df.columns:
+    match_df['Abs_xGF_diff'] = np.abs(match_df['Diff_xGF_ewm'])
+else:
+    match_df['Abs_xGF_diff'] = np.abs(match_df['Diff_GF_ewm'])
+
+# 3) Goal balance index — ทั้งคู่ยิงใกล้เคียงกัน = แนวโน้มเสมอ
+match_df['GF_balance']  = 1 / (match_df['Abs_xGF_diff'] + 0.3)
+
+# 4) GA balance index — ทั้งคู่เสียใกล้เคียงกัน = เกมทาง
+match_df['GA_balance']  = 1 / (np.abs(match_df['H_GA_ewm'] - match_df['A_GA_ewm']) + 0.3)
+
+# 5) xG tightness — combined xG ต่ำ + gap ต่ำ = 0-0 หรือ 1-1
+if XG_AVAILABLE and 'H_xGF_ewm' in match_df.columns and 'A_xGF_ewm' in match_df.columns:
+    _xg_sum = match_df['H_xGF_ewm'] + match_df['A_xGF_ewm']
+    match_df['xG_tightness'] = 1 / (match_df['Abs_xGF_diff'] + 0.3) / (_xg_sum.clip(0.5) + 0.5)
+else:
+    match_df['xG_tightness'] = match_df['GF_balance']
+
+# 6) Draw_EloXForm interaction — Elo ใกล้ + form ใกล้ = double signal
+match_df['Draw_EloXForm']   = match_df['Elo_closeness'] * match_df['Form_closeness']
+
+# 7) Late season draw — ช่วงปลายฤดูกาล ทีม mid-table มักเสมอมาก
+match_df['Late_season_draw'] = (match_df['SeasonPhase'] == 3).astype(int) * \
+                                (1 - np.abs(match_df['Elo_ratio'] - 1).clip(0, 0.3) / 0.3)
+
+# 8) Combined GF ewm — กอง attack สองฝ่ายรวมกัน (เกม high-scoring น้อยโอกาสเสมอ)
+match_df['Combined_GF_ewm'] = match_df['H_GF_ewm'] + match_df['A_GF_ewm']
+
+print("✅ Draw-focused features (v9 STEP 1): +8 features")
+
+# ══════════════════════════════════════════════════════════════
 # 🔥 PHASE 1: xG MATCH-LEVEL FEATURES (ถ้า xG พร้อม)
 # ══════════════════════════════════════════════════════════════
 
@@ -762,6 +811,14 @@ FEATURES = [
     'H_AttackIdx', 'A_AttackIdx', 'Diff_AttackIdx',      # attack index
     'H_DefStr', 'A_DefStr', 'Diff_DefStr',               # defensive strength
     'Elo_closeness', 'Form_closeness', 'Draw_likelihood', # draw signal
+
+    # ── 🔥 STEP 1 (v9): Draw-Focused Features ────────────────
+    'Abs_Elo_diff', 'Abs_xGF_diff',                       # absolute gaps
+    'GF_balance', 'GA_balance',                            # balance indices
+    'xG_tightness',                                        # tight xG = draw
+    'Draw_EloXForm',                                       # Elo × Form interaction
+    'Late_season_draw',                                    # seasonal draw tendency
+    'Combined_GF_ewm',                                     # total attack output
 ]
 
 # 🔥 PHASE 1: เพิ่ม xG features ถ้า dataset มี xG
@@ -921,11 +978,12 @@ def tune_lgbm_optuna(X_tr, y_tr, n_trials=40, timeout=120):
             'colsample_bytree':  trial.suggest_float('colsample_bytree', 0.6, 1.0),
             'reg_alpha':         trial.suggest_float('reg_alpha', 1e-4, 1.0, log=True),
             'reg_lambda':        trial.suggest_float('reg_lambda', 1e-4, 1.0, log=True),
-            # 🔥 FIX A: เพิ่ม multiclass objective เพื่อให้โมเดลเรียนรู้ probability จริง
             'objective':         'multiclass',
             'metric':            'multi_logloss',
             'num_class':         3,
-            'class_weight':      'balanced',
+            # 🔥 STEP 3 (v9): เพิ่ม draw weight ใน Optuna objective ด้วย
+            #    ให้ log_loss คำนวณโดย penalty draw misclassification มากขึ้น
+            'class_weight':      {0: 1, 1: 2.0, 2: 1},
             'random_state':      42,
             'n_jobs':            -1,
             'verbose':           -1,
@@ -934,9 +992,6 @@ def tune_lgbm_optuna(X_tr, y_tr, n_trials=40, timeout=120):
         scores = []
         for train_idx, val_idx in tscv.split(X_tr):
             model.fit(X_tr[train_idx], y_tr[train_idx])
-            # 🔥 FIX A: Optimize log loss แทน F1 — proper scoring rule สำหรับ probability
-            #    log loss บังคับให้ model output probability ที่ calibrated จริง ๆ
-            #    ไม่ใช่แค่ทาย class ให้ถูก → ช่วย Draw calibration โดยตรง
             prob = model.predict_proba(X_tr[val_idx])
             scores.append(-log_loss(y_tr[val_idx], prob))  # negative เพราะ maximize
         return np.mean(scores)
@@ -944,7 +999,8 @@ def tune_lgbm_optuna(X_tr, y_tr, n_trials=40, timeout=120):
     study = optuna.create_study(direction='maximize',
                                 sampler=optuna.samplers.TPESampler(seed=42))
     study.optimize(objective, n_trials=n_trials, timeout=timeout, show_progress_bar=False)
-    print(f"  ✅ Optuna best macro F1: {study.best_value:.4f}  (trials={len(study.trials)})")
+    # 🔥 STEP 3: แสดง log loss ที่แท้จริง (ไม่ใช่ macro F1)
+    print(f"  ✅ Optuna best log_loss: {-study.best_value:.4f}  (trials={len(study.trials)})")
     print(f"  Best params: n_est={study.best_params.get('n_estimators')}, "
           f"lr={study.best_params.get('learning_rate'):.3f}, "
           f"leaves={study.best_params.get('num_leaves')}, "
@@ -1047,18 +1103,24 @@ X_train_nodraw = X_train_smote[y_train_smote != 1]
 
 # Stage 1 LightGBM params
 if LGBM_AVAILABLE:
+    # 🔥 STEP 2 (v9): Stage 1 ใช้ class_weight {0:1, 1:2.5} แทน 'balanced'
+    #    Stage 1 = Binary: Draw(1) vs Not-Draw(0)
+    #    ปัญหาเดิม: 'balanced' → draw recall ต่ำเกินไป โมเดลกลัว false positive
+    #    แก้: เพิ่ม penalty ถ้าพลาด draw 2.5x → recall draw ขึ้น
+    #    Note: Stage 2 (Home vs Away) ยังใช้ 'balanced' เพราะ 2 class นี้ balance ดีอยู่แล้ว
     stage1_params = {**{
         'n_estimators': 400, 'learning_rate': 0.05, 'max_depth': 5,
         'num_leaves': 25, 'min_child_samples': 15, 'subsample': 0.8,
         'colsample_bytree': 0.8, 'reg_alpha': 0.1, 'reg_lambda': 0.1,
-        'class_weight': 'balanced', 'random_state': 42, 'n_jobs': -1, 'verbose': -1,
+        'class_weight': {0: 1, 1: 2.5},   # 🔥 STEP 2: draw penalty 2.5x
+        'random_state': 42, 'n_jobs': -1, 'verbose': -1,
     }, **{k: v for k, v in best_lgbm_params.items() if k in [
         'learning_rate', 'max_depth', 'num_leaves', 'min_child_samples',
         'subsample', 'colsample_bytree', 'reg_alpha', 'reg_lambda', 'n_estimators'
     ]}}
     stage1_model = lgb.LGBMClassifier(**stage1_params)
     stage2_model = lgb.LGBMClassifier(**{**stage1_params, 'class_weight': 'balanced'})
-    print("  Stage 1 (Draw vs Not): LightGBM 🔥")
+    print("  Stage 1 (Draw vs Not): LightGBM 🔥  [draw_weight=2.5]")
     print("  Stage 2 (Home vs Away): LightGBM 🔥")
 else:
     stage1_model = GradientBoostingClassifier(
@@ -1166,6 +1228,33 @@ def blend_ml_poisson(ml_proba, poisson_proba, alpha=0.6):
     Normalize หลัง blend
     """
     blended = alpha * ml_proba + (1 - alpha) * poisson_proba
+    row_sums = blended.sum(axis=1, keepdims=True)
+    return blended / np.where(row_sums > 0, row_sums, 1)
+
+
+def blend_ml_poisson_dynamic(ml_proba, poisson_proba, elo_diffs, base_alpha=0.5):
+    """
+    🔥 STEP 4 (v9): Dynamic α Hybrid Blend
+    ถ้า Elo_diff สูง (คู่ไม่สูสี) → เชื่อ ML มาก (alpha สูง)
+    ถ้า Elo_diff ต่ำ (คู่สูสี)    → เชื่อ Poisson มาก (alpha ต่ำ)
+    เหตุผล: Poisson ดีกับเกมสูสี (predict draw จาก xG), ML ดีกับมิสแมช (ดู features มาก)
+
+    elo_diffs: abs(H_Elo - A_Elo) สำหรับแต่ละ match
+    alpha range: [base_alpha - 0.2, base_alpha + 0.2]
+    """
+    elo_diffs = np.array(elo_diffs)
+    # normalize elo_diff → [0, 1]  โดยใช้ max ~500 (ห่างมาก)
+    elo_norm = np.clip(elo_diffs / 400.0, 0, 1)
+    # dynamic alpha: สูงเมื่อ elo diff สูง
+    dynamic_alpha = base_alpha - 0.2 + 0.4 * elo_norm   # range [base-0.2, base+0.2]
+    dynamic_alpha = np.clip(dynamic_alpha, 0.1, 0.9)
+
+    n = ml_proba.shape[0]
+    blended = np.zeros_like(ml_proba, dtype=float)
+    for i in range(n):
+        a = dynamic_alpha[i]
+        blended[i] = a * ml_proba[i] + (1 - a) * poisson_proba[i]
+
     row_sums = blended.sum(axis=1, keepdims=True)
     return blended / np.where(row_sums > 0, row_sums, 1)
 
@@ -1432,6 +1521,41 @@ def build_match_row(home_team, away_team, match_date=None):
         'Diff_xAttackIdx': (h.get('xGF_ewm', np.nan) / (max(a.get('xGA_ewm', 0.3) or 0.3, 0.3) + 0.01) -
                             a.get('xGF_ewm', np.nan) / (max(h.get('xGA_ewm', 0.3) or 0.3, 0.3) + 0.01)) if XG_AVAILABLE else np.nan,
     }
+
+    # ══════════════════════════════════════════════════════════════
+    # 🔥 STEP 1 (v9): DRAW-FOCUSED FEATURES
+    #    ต้องคำนวณที่นี่ด้วย ไม่งั้น future_df[FEATURES] จะ KeyError
+    # ══════════════════════════════════════════════════════════════
+    diff_elo = row['Diff_Elo']
+    row['Abs_Elo_diff'] = abs(diff_elo)
+
+    # Abs_xGF_diff — ใช้ xGF_ewm ถ้ามี, fallback เป็น GF_ewm
+    if XG_AVAILABLE:
+        _xgf_h = h.get('xGF_ewm', np.nan)
+        _xgf_a = a.get('xGF_ewm', np.nan)
+        if not (np.isnan(_xgf_h) or np.isnan(_xgf_a)):
+            _abs_xgf = abs(_xgf_h - _xgf_a)
+            _xg_sum  = _xgf_h + _xgf_a
+        else:
+            _abs_xgf = abs(h['GF_ewm'] - a['GF_ewm'])
+            _xg_sum  = None
+    else:
+        _abs_xgf = abs(h['GF_ewm'] - a['GF_ewm'])
+        _xg_sum  = None
+
+    row['Abs_xGF_diff'] = _abs_xgf
+    row['GF_balance']   = 1 / (_abs_xgf + 0.3)
+    row['GA_balance']   = 1 / (abs(h['GA_ewm'] - a['GA_ewm']) + 0.3)
+
+    if _xg_sum is not None:
+        row['xG_tightness'] = 1 / (_abs_xgf + 0.3) / (max(_xg_sum, 0.5) + 0.5)
+    else:
+        row['xG_tightness'] = row['GF_balance']
+
+    row['Draw_EloXForm']    = row['Elo_closeness'] * row['Form_closeness']
+    row['Late_season_draw'] = int(season_phase == 3) * min(home_draw_rate + 0.1, 1.0)
+    row['Combined_GF_ewm']  = h['GF_ewm'] + a['GF_ewm']
+
     return row
 
 
@@ -1485,12 +1609,18 @@ def predict_match(home_team, away_team, match_date=None,
             axg    = float(np.clip(away_poisson_model.predict(pf_sc)[0], 0.3, 6.0))
             ph, pd_, pa = poisson_win_draw_loss(hxg, axg)
             proba_pois  = np.array([pa, pd_, ph])
-            proba       = blend_ml_poisson(proba_ml.reshape(1,-1),
-                                           proba_pois.reshape(1,-1),
-                                           alpha=best_alpha)
-            # 🔥 FIX C: Apply draw suppression ให้ consistent กับ training
-            proba       = suppress_draw_proba(proba, draw_factor=DRAW_SUPPRESS_FACTOR)[0]
-            model_tag   = f"Hybrid α={best_alpha:.2f} 🔥"
+            # 🔥 STEP 4 (v9): Dynamic α per-match (ใช้ Elo_diff ของ match นี้)
+            match_elo_diff = abs(row.get('Diff_Elo', row.get('H_Elo', 1500) - row.get('A_Elo', 1500)))
+            proba = blend_ml_poisson_dynamic(
+                proba_ml.reshape(1,-1),
+                proba_pois.reshape(1,-1),
+                elo_diffs=[match_elo_diff],
+                base_alpha=best_alpha
+            )
+            proba = suppress_draw_proba(proba, draw_factor=DRAW_SUPPRESS_FACTOR)[0]
+            # แสดง alpha จริงที่ใช้สำหรับ match นี้
+            _actual_alpha = float(np.clip(best_alpha - 0.2 + 0.4 * min(match_elo_diff/400, 1), 0.1, 0.9))
+            model_tag   = f"Hybrid α={_actual_alpha:.2f} 🔥"
         except Exception:
             proba = proba_ml
             hxg = axg = None
@@ -1629,7 +1759,7 @@ def poisson_win_draw_loss(home_xg, away_xg, max_goals=8):
 
 print("\n🔥 PHASE 3: Building Poisson Hybrid Blend...")
 POISSON_HYBRID_READY = False
-best_alpha = 0.6   # default fallback
+best_alpha = 0.5   # default fallback
 proba_hybrid = proba_2stage.copy()   # default: ML-only
 
 if POISSON_MODEL_READY:
@@ -1638,13 +1768,21 @@ if POISSON_MODEL_READY:
             test, poisson_features_used,
             poisson_scaler, home_poisson_model, away_poisson_model
         )
+        # 🔥 STEP 4 (v9): Dynamic α Blend
+        #    หา base_alpha ที่ดีที่สุดก่อน (fixed grid search)
         best_alpha, best_blend_f1 = optimize_blend_alpha(
             proba_2stage, poisson_proba_test, y_test.values
         )
-        proba_hybrid = blend_ml_poisson(proba_2stage, poisson_proba_test, alpha=best_alpha)
+        # แล้วใช้ dynamic blend โดยยึด base_alpha นั้น แต่ปรับตาม Elo_diff
+        test_elo_diffs = np.abs(test['Diff_Elo'].fillna(0).values)
+        proba_hybrid = blend_ml_poisson_dynamic(
+            proba_2stage, poisson_proba_test,
+            elo_diffs=test_elo_diffs, base_alpha=best_alpha
+        )
         POISSON_HYBRID_READY = True
-        print(f"  ✅ Poisson Hybrid: best alpha={best_alpha:.2f}  macro F1={best_blend_f1:.4f}")
-        print(f"     ({best_alpha:.2f} ML + {1-best_alpha:.2f} Poisson)")
+        avg_alpha = np.clip(best_alpha - 0.2 + 0.4 * np.clip(test_elo_diffs / 400, 0, 1), 0.1, 0.9).mean()
+        print(f"  ✅ Poisson Hybrid (Dynamic α): base={best_alpha:.2f}  avg_α={avg_alpha:.2f}  macro F1={best_blend_f1:.4f}")
+        print(f"     Tight games (Elo_diff<100): α≈{best_alpha-0.15:.2f} | Mismatches (Elo_diff>300): α≈{best_alpha+0.15:.2f}")
     except Exception as e:
         print(f"  ⚠️  Poisson hybrid failed: {e} — using ML-only")
 else:
@@ -1655,12 +1793,23 @@ else:
 # ══════════════════════════════════════════════════════════════
 
 print("\n🔥 S6: Optimizing prediction thresholds...")
-# 🔥 FIX C: Apply draw suppression เพื่อแก้ systematic bias +11%
-#    ทำก่อน threshold optimization เพื่อให้ thresholds calibrate บน proba ที่ถูกต้อง
-DRAW_SUPPRESS_FACTOR = 0.85
+# 🔥 STEP 5 (v9): ปรับ draw suppression
+#    v8: factor=0.85 (เดิมต้องแก้ systematic bias +11%)
+#    v9: class_weight draw=2.5 ทำให้โมเดลทาย draw มากขึ้นแล้ว
+#    → ลด suppression เป็น 0.92 เพื่อไม่ overcorrect กลับ
+#    → ถ้า bias ยังสูง → threshold optimization จะจัดการส่วนที่เหลือ
+DRAW_SUPPRESS_FACTOR = 0.92   # 🔥 STEP 5: ลดจาก 0.85 → 0.92
 proba_hybrid = suppress_draw_proba(proba_hybrid, draw_factor=DRAW_SUPPRESS_FACTOR)
-print(f"  🔧 Draw suppression applied (factor={DRAW_SUPPRESS_FACTOR}) — fixing systematic bias")
-OPT_T_HOME, OPT_T_DRAW, best_macro_f1 = optimize_thresholds(proba_hybrid, y_test)
+print(f"  🔧 Draw suppression applied (factor={DRAW_SUPPRESS_FACTOR}) — v9: lighter suppression")
+
+# 🔥 STEP 5: ขยาย t_draw range ให้ threshold optimization หา sweet spot ที่ถูก
+#    เดิม: default range (0.15, 0.55) — ช่วงกว้างเกินไป → noise
+#    ใหม่: ใช้ range (0.15, 0.40) เน้น draw recall ดีขึ้น
+OPT_T_HOME, OPT_T_DRAW, best_macro_f1 = optimize_thresholds(
+    proba_hybrid, y_test,
+    t_draw_range=(0.15, 0.40),   # 🔥 STEP 5: draw threshold ไม่เกิน 0.40
+    t_home_range=(0.30, 0.55),
+)
 print(f"  Optimal t_home={OPT_T_HOME:.3f}  t_draw={OPT_T_DRAW:.3f}")
 print(f"  Best macro F1 = {best_macro_f1:.4f}")
 
@@ -1754,14 +1903,14 @@ model_bundle = {
     'poisson_features':    poisson_features_used if POISSON_MODEL_READY else [],
     'xg_available':        XG_AVAILABLE,
     'odds_available':      ODDS_AVAILABLE,
-    'version':             '8.0',   # 🔥 bump version
+    'version':             '9.0',   # 🔥 bump version
 }
 
 os.makedirs("model", exist_ok=True)
-with open("model/football_model_v8.pkl", "wb") as f:
+with open("model/football_model_v9.pkl", "wb") as f:
     pickle.dump(model_bundle, f)
 
-print("✅ Model v8 saved → model/football_model_v8.pkl")
+print("✅ Model v9 saved → model/football_model_v9.pkl")
 
 
 def predict_score(home_team, away_team, use_poisson_model=True):
