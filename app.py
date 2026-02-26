@@ -215,11 +215,24 @@ def get_result(row):
 
 match_df['Result3'] = match_df.apply(get_result, axis=1)
 
+# ── เพิ่ม Features ใหม่: Elo ของแต่ละทีม + Scored/CS rate ──
+match_df['Diff_Scored'] = match_df['H_Scored5'] - match_df['A_Scored5']
+match_df['H_Elo_norm']  = match_df['H_Elo'] / 1500
+match_df['A_Elo_norm']  = match_df['A_Elo'] / 1500
+match_df['Elo_ratio']   = match_df['H_Elo'] / (match_df['A_Elo'] + 1)
+
 FEATURES = [
+    # Difference features
     'Diff_Pts', 'Diff_GF', 'Diff_GA', 'Diff_Win',
-    'Diff_CS', 'Diff_Streak', 'Diff_Elo', 'H2H_HomeWinRate',
-    'H_GF5', 'H_GA5', 'H_Pts5', 'H_Streak3',
-    'A_GF5', 'A_GA5', 'A_Pts5', 'A_Streak3',
+    'Diff_CS', 'Diff_Streak', 'Diff_Elo', 'Diff_Scored',
+    # H2H
+    'H2H_HomeWinRate',
+    # Home team stats
+    'H_GF5', 'H_GA5', 'H_Pts5', 'H_Streak3', 'H_CS5', 'H_Scored5',
+    # Away team stats
+    'A_GF5', 'A_GA5', 'A_Pts5', 'A_Streak3', 'A_CS5', 'A_Scored5',
+    # Elo
+    'H_Elo_norm', 'A_Elo_norm', 'Elo_ratio',
 ]
 
 # ==============================
@@ -261,7 +274,6 @@ xgb = XGBClassifier(
     learning_rate=0.05,
     subsample=0.8,
     colsample_bytree=0.8,
-    use_label_encoder=False,
     eval_metric='mlogloss',
     random_state=42,
     verbosity=0
@@ -339,12 +351,14 @@ def predict_match(home_team, away_team, model_path="model/football_model.pkl"):
                 'GF5': last['A_GF5'], 'GA5': last['A_GA5'],
                 'Pts5': last['A_Pts5'], 'Streak3': last['A_Streak3'],
                 'Win5': last['A_Win5'], 'CS5': last['A_CS5'],
+                'Scored5': last['A_Scored5'],
             }
         last = rows.iloc[-1]
         return {
             'GF5': last['H_GF5'], 'GA5': last['H_GA5'],
             'Pts5': last['H_Pts5'], 'Streak3': last['H_Streak3'],
             'Win5': last['H_Win5'], 'CS5': last['H_CS5'],
+            'Scored5': last['H_Scored5'],
         }
 
     h_stats = latest_home_stats(home_team)
@@ -367,15 +381,23 @@ def predict_match(home_team, away_team, model_path="model/football_model.pkl"):
         'Diff_CS':           h_stats['CS5']     - a_stats['CS5'],
         'Diff_Streak':       h_stats['Streak3'] - a_stats['Streak3'],
         'Diff_Elo':          h_elo - a_elo,
+        'Diff_Scored':       h_stats['Scored5'] - a_stats['Scored5'],
         'H2H_HomeWinRate':   h2h_rate,
         'H_GF5':             h_stats['GF5'],
         'H_GA5':             h_stats['GA5'],
         'H_Pts5':            h_stats['Pts5'],
         'H_Streak3':         h_stats['Streak3'],
+        'H_CS5':             h_stats['CS5'],
+        'H_Scored5':         h_stats['Scored5'],
         'A_GF5':             a_stats['GF5'],
         'A_GA5':             a_stats['GA5'],
         'A_Pts5':            a_stats['Pts5'],
         'A_Streak3':         a_stats['Streak3'],
+        'A_CS5':             a_stats['CS5'],
+        'A_Scored5':         a_stats['Scored5'],
+        'H_Elo_norm':        h_elo / 1500,
+        'A_Elo_norm':        a_elo / 1500,
+        'Elo_ratio':         h_elo / (a_elo + 1),
     }
 
     X = pd.DataFrame([row])[feats]
@@ -467,14 +489,17 @@ def get_latest_features(team, is_home):
             last = rows.iloc[-1]
             return {'GF5': last['H_GF5'], 'GA5': last['H_GA5'],
                     'Pts5': last['H_Pts5'], 'Streak3': last['H_Streak3'],
-                    'Win5': last['H_Win5'], 'CS5': last['H_CS5']}
+                    'Win5': last['H_Win5'], 'CS5': last['H_CS5'],
+                    'Scored5': last['H_Scored5']}
     rows = match_df[match_df['AwayTeam'] == team].sort_values('Date_x')
     if len(rows) > 0:
         last = rows.iloc[-1]
         return {'GF5': last['A_GF5'], 'GA5': last['A_GA5'],
                 'Pts5': last['A_Pts5'], 'Streak3': last['A_Streak3'],
-                'Win5': last['A_Win5'], 'CS5': last['A_CS5']}
-    return {'GF5': 1.5, 'GA5': 1.5, 'Pts5': 1.5, 'Streak3': 1.5, 'Win5': 0.5, 'CS5': 0.2}
+                'Win5': last['A_Win5'], 'CS5': last['A_CS5'],
+                'Scored5': last['A_Scored5']}
+    return {'GF5': 1.5, 'GA5': 1.5, 'Pts5': 1.5, 'Streak3': 1.5,
+            'Win5': 0.5, 'CS5': 0.2, 'Scored5': 0.6}
 
 pred_table = {}
 
@@ -490,18 +515,24 @@ if len(unplayed) > 0:
         h2h_rate = h2h_rows['H2H_HomeWinRate'].iloc[-1] if len(h2h_rows) > 0 else 0.33
         future_rows.append({
             'HomeTeam': home, 'AwayTeam': away,
-            'Diff_Pts':    h['Pts5']    - a['Pts5'],
-            'Diff_GF':     h['GF5']     - a['GF5'],
-            'Diff_GA':     h['GA5']     - a['GA5'],
-            'Diff_Win':    h['Win5']    - a['Win5'],
-            'Diff_CS':     h['CS5']     - a['CS5'],
-            'Diff_Streak': h['Streak3'] - a['Streak3'],
-            'Diff_Elo':    h_elo - a_elo,
+            'Diff_Pts':     h['Pts5']     - a['Pts5'],
+            'Diff_GF':      h['GF5']      - a['GF5'],
+            'Diff_GA':      h['GA5']      - a['GA5'],
+            'Diff_Win':     h['Win5']     - a['Win5'],
+            'Diff_CS':      h['CS5']      - a['CS5'],
+            'Diff_Streak':  h['Streak3']  - a['Streak3'],
+            'Diff_Elo':     h_elo - a_elo,
+            'Diff_Scored':  h['Scored5']  - a['Scored5'],
             'H2H_HomeWinRate': h2h_rate,
-            'H_GF5': h['GF5'], 'H_GA5': h['GA5'],
-            'H_Pts5': h['Pts5'], 'H_Streak3': h['Streak3'],
-            'A_GF5': a['GF5'], 'A_GA5': a['GA5'],
-            'A_Pts5': a['Pts5'], 'A_Streak3': a['Streak3'],
+            'H_GF5': h['GF5'],     'H_GA5': h['GA5'],
+            'H_Pts5': h['Pts5'],   'H_Streak3': h['Streak3'],
+            'H_CS5': h['CS5'],     'H_Scored5': h['Scored5'],
+            'A_GF5': a['GF5'],     'A_GA5': a['GA5'],
+            'A_Pts5': a['Pts5'],   'A_Streak3': a['Streak3'],
+            'A_CS5': a['CS5'],     'A_Scored5': a['Scored5'],
+            'H_Elo_norm': h_elo / 1500,
+            'A_Elo_norm': a_elo / 1500,
+            'Elo_ratio':  h_elo / (a_elo + 1),
         })
 
     future_df = pd.DataFrame(future_rows)
@@ -555,13 +586,15 @@ print(f"  🔴 = Top 3 (UEFA CL)  |  🟡 = Relegation Zone")
 # ==============================
 
 def get_last_5_results(team):
-    home_matches = data[data['HomeTeam'] == team][['Date','HomeTeam','AwayTeam','FTHG','FTAG']].copy()
+    valid_data = data.dropna(subset=['FTHG', 'FTAG']).copy()
+
+    home_matches = valid_data[valid_data['HomeTeam'] == team][['Date','HomeTeam','AwayTeam','FTHG','FTAG']].copy()
     home_matches['Venue']    = 'H'
     home_matches['GF']       = home_matches['FTHG']
     home_matches['GA']       = home_matches['FTAG']
     home_matches['Opponent'] = home_matches['AwayTeam']
 
-    away_matches = data[data['AwayTeam'] == team][['Date','HomeTeam','AwayTeam','FTHG','FTAG']].copy()
+    away_matches = valid_data[valid_data['AwayTeam'] == team][['Date','HomeTeam','AwayTeam','FTHG','FTAG']].copy()
     away_matches['Venue']    = 'A'
     away_matches['GF']       = away_matches['FTAG']
     away_matches['GA']       = away_matches['FTHG']
@@ -854,45 +887,66 @@ def fetch_fixtures_from_api(target_team, num_matches=5):
         return None
 
 
-def fetch_all_pl_fixtures():
+def update_season_csv_from_api():
     """
-    ดึงตารางแข่ง PL ทั้งหมดที่เหลือ แล้ว save เป็น CSV
-    เพื่อ update data_set/season 2025.csv ให้ครบ
+    ดึงตารางแข่ง PL ทั้งหมด (แข่งแล้ว + ยังไม่แข่ง)
+    จาก API แล้วเขียนทับ season 2025.csv วันที่แม่น 100%
     """
-    if API_KEY == "YOUR_API_KEY_HERE":
-        print("❌ ยังไม่ได้ใส่ API Key!")
-        return
+    from datetime import datetime, timedelta
 
     url     = "https://api.football-data.org/v4/competitions/PL/matches"
     headers = {"X-Auth-Token": API_KEY}
-    params  = {"status": "SCHEDULED"}
 
     try:
-        r = requests.get(url, headers=headers, params=params, timeout=10)
+        print("\n" + "="*55)
+        print("  📥  อัปเดต season 2025.csv จาก API...")
+        r = requests.get(url, headers=headers,
+                         params={"season": "2025"}, timeout=15)
         r.raise_for_status()
         matches = r.json().get("matches", [])
+        print(f"  ✅ ดึงได้ {len(matches)} แมตช์")
 
         rows = []
         for m in matches:
+            utc_dt   = datetime.fromisoformat(m["utcDate"].replace("Z", "+00:00"))
+            th_dt    = utc_dt + timedelta(hours=7)
+            date_str = th_dt.strftime("%d/%m/%Y")
+            status   = m.get("status", "")
+            full     = m.get("score", {}).get("fullTime", {})
+
+            if status in ["FINISHED", "IN_PLAY", "PAUSED"]:
+                hg  = full.get("home", "")
+                ag  = full.get("away", "")
+                ftr = ("H" if hg > ag else ("A" if ag > hg else "D")) if hg != "" else ""
+            else:
+                hg, ag, ftr = "", "", ""
+
             rows.append({
-                "Date":     pd.to_datetime(m["utcDate"]).strftime("%d/%m/%Y"),
+                "Date":     date_str,
                 "HomeTeam": normalize(m["homeTeam"]["name"]),
                 "AwayTeam": normalize(m["awayTeam"]["name"]),
-                "FTHG":     "",    # ว่าง = ยังไม่แข่ง
-                "FTAG":     "",
+                "FTHG":     hg,
+                "FTAG":     ag,
+                "FTR":      ftr,
             })
 
-        fixtures_df = pd.DataFrame(rows)
-        season_file = pd.read_csv("data_set/season 2025.csv")
+        df_new = pd.DataFrame(rows)
+        played   = len(df_new[df_new["FTHG"] != ""])
+        upcoming = len(df_new[df_new["FTHG"] == ""])
+        df_new.to_csv("data_set/season 2025.csv", index=False)
+        print(f"  ✅ แข่งแล้ว {played} นัด | ยังไม่แข่ง {upcoming} นัด")
+        print(f"  💾 บันทึก → data_set/season 2025.csv")
+        print("="*55)
+        return df_new
 
-        # Merge เข้ากับ season file เดิม
-        merged = pd.concat([season_file, fixtures_df], ignore_index=True)
-        merged = merged.drop_duplicates(subset=["HomeTeam", "AwayTeam"])
-        merged.to_csv("data_set/season 2025.csv", index=False)
-        print(f"✅ อัปเดต season 2025.csv แล้ว — {len(fixtures_df)} นัดอนาคต")
-
+    except requests.exceptions.ConnectionError:
+        print("  ❌ ไม่มีอินเทอร์เน็ต — ใช้ข้อมูลเดิม")
     except Exception as e:
-        print(f"❌ {e}")
+        print(f"  ❌ Error: {e}")
+
+# alias
+def fetch_all_pl_fixtures():
+    return update_season_csv_from_api()
 
 
 # ==============================
@@ -925,7 +979,6 @@ def show_next_pl_fixtures(num_matches=5):
         return
 
     SEP  = "=" * 65
-    LINE = "-" * 78
 
     url     = "https://api.football-data.org/v4/competitions/PL/matches"
     headers = {"X-Auth-Token": API_KEY}
@@ -1009,7 +1062,11 @@ def show_next_pl_fixtures(num_matches=5):
 # 🚀 เรียกใช้งาน
 # ==============================
 
-# ── ทำนายทีมที่ต้องการ ──
+# ── STEP 1: อัปเดตตารางแข่งจาก API (วันที่แม่น 100%) ──
+# รันทุกครั้งเพื่อให้ข้อมูลล่าสุด
+update_season_csv_from_api()
+
+# ── STEP 2: ทำนายทีมที่ต้องการ ──
 predict_with_api("Arsenal")
 # predict_with_api("Liverpool")
 # predict_with_api("Man City")
@@ -1017,6 +1074,148 @@ predict_with_api("Arsenal")
 # predict_with_api("Aston Villa")
 
 # ── แสดงตารางแข่ง PL ถัดไปพร้อมทำนาย ──
-show_next_pl_fixtures(10)    # 5 นัดถัดไป
+show_next_pl_fixtures(5)    # 5 นัดถัดไป
 # show_next_pl_fixtures(10)  # 10 นัด
 # show_next_pl_fixtures(20)  # 20 นัด
+
+
+# ==============================
+# 20) FULL SUMMARY REPORT
+# ==============================
+
+def print_full_summary():
+    SEP  = "=" * 65
+    LINE = "─" * 65
+
+    print()
+    print("█" * 65)
+    print("  📊  FOOTBALL AI — FULL SUMMARY REPORT")
+    print(f"  🗓️  วันที่รายงาน: {TODAY.date()}  |  ข้อมูลถึง: {data['Date'].max().date()}")
+    print("█" * 65)
+
+    # ── 1. ข้อมูลโดยรวม ──────────────────────────────────────────
+    print()
+    print(SEP)
+    print("  📁  1. ข้อมูลที่ใช้เทรน")
+    print(SEP)
+    total_seasons = data['Date'].dt.year.nunique()
+    teams_count   = data['HomeTeam'].nunique()
+    print(f"  • แมตช์ทั้งหมด    : {len(data):,} นัด ({total_seasons} ฤดูกาล)")
+    print(f"  • จำนวนทีม        : {teams_count} ทีม")
+    print(f"  • ช่วงเวลา        : {data['Date'].min().date()} → {data['Date'].max().date()}")
+    print(f"  • แมตช์เทรน (80%) : {len(train):,} นัด")
+    print(f"  • แมตช์เทสต์(20%) : {len(test):,} นัด")
+    print(f"  • Features ที่ใช้  : {len(FEATURES)} ตัว")
+
+    # ── 2. Model Performance ──────────────────────────────────────
+    print()
+    print(SEP)
+    print("  🤖  2. ประสิทธิภาพโมเดล (Ensemble: LR + RF + XGB)")
+    print(SEP)
+    acc = round(accuracy_score(y_test, y_pred) * 100, 2)
+    print(f"  • Accuracy บน Test Set  : {acc}%")
+
+    cm = confusion_matrix(y_test, y_pred)
+    labels = ['Away Win', 'Draw', 'Home Win']
+    print(f"\n  Confusion Matrix:")
+    print(f"  {'':>14}", end="")
+    for l in labels:
+        print(f"  {l:>10}", end="")
+    print()
+    for i, label in enumerate(labels):
+        print(f"  {'Actual ':>7}{label:>9}  ", end="")
+        for j in range(3):
+            print(f"  {cm[i][j]:>10}", end="")
+        print()
+
+    from sklearn.metrics import classification_report
+    report = classification_report(y_test, y_pred, target_names=labels, output_dict=True)
+    print(f"\n  {'ผลลัพธ์':<15} {'Precision':>10} {'Recall':>10} {'F1-Score':>10} {'Support':>10}")
+    print(f"  {LINE}")
+    for label in labels:
+        r = report[label]
+        print(f"  {label:<15} {r['precision']:>10.2f} {r['recall']:>10.2f} {r['f1-score']:>10.2f} {int(r['support']):>10}")
+    print(f"  {LINE}")
+    print(f"  {'Accuracy':<15} {'':>10} {'':>10} {report['accuracy']:>10.2f} {int(report['macro avg']['support']):>10}")
+
+    # ── 3. Elo Rating Top 10 ──────────────────────────────────────
+    print()
+    print(SEP)
+    print("  🏆  3. Elo Rating ล่าสุด (Top 10)")
+    print(SEP)
+    elo_sorted = sorted(final_elo.items(), key=lambda x: x[1], reverse=True)[:10]
+    print(f"  {'#':<5} {'ทีม':<25} {'Elo':>8}  {'Bar'}")
+    print(f"  {LINE}")
+    max_elo = elo_sorted[0][1]
+    for rank, (team, elo_val) in enumerate(elo_sorted, 1):
+        bar = '█' * int((elo_val / max_elo) * 20)
+        marker = "🥇" if rank == 1 else ("🥈" if rank == 2 else ("🥉" if rank == 3 else f"{rank:<2} "))
+        print(f"  {marker}   {team:<25} {round(elo_val):>8}  {bar}")
+
+    # ── 4. ตาราง Season 2025-26 สรุป ─────────────────────────────
+    print()
+    print(SEP)
+    print("  📋  4. ตารางคะแนน Season 2025-26 (คาดการณ์สิ้นฤดูกาล)")
+    print(SEP)
+    print(f"  {'#':<5} {'ทีม':<22} {'คะแนนจริง':>10} {'คะแนนทำนาย':>12} {'รวม':>7}  {'สถานะ'}")
+    print(f"  {LINE}")
+    for rank, (team, row) in enumerate(final_table.iterrows(), 1):
+        if rank <= 3:
+            status = "🔴 Champions League"
+        elif rank <= 6:
+            status = "🟠 Europa / Conf."
+        elif rank >= 18:
+            status = "🟡 ตกชั้น"
+        else:
+            status = ""
+        print(f"  {rank:<5} {team:<22} {int(row['RealPoints']):>10} {int(row['PredictedPoints']):>12} {int(row['FinalPoints']):>7}  {status}")
+    print(f"  {LINE}")
+    print(f"  🔴 Top 3 = UEFA CL  |  🟠 Top 4-6 = Europa/Conf.  |  🟡 18-20 = ตกชั้น")
+
+    # ── 5. สถิติทั่วไปของดาต้า ────────────────────────────────────
+    print()
+    print(SEP)
+    print("  📈  5. สถิติน่าสนใจจากข้อมูล")
+    print(SEP)
+    valid = data.dropna(subset=['FTHG', 'FTAG'])
+    home_wins  = (valid['FTHG'] > valid['FTAG']).sum()
+    draws      = (valid['FTHG'] == valid['FTAG']).sum()
+    away_wins  = (valid['FTHG'] < valid['FTAG']).sum()
+    total_v    = len(valid)
+    avg_goals  = (valid['FTHG'] + valid['FTAG']).mean()
+    avg_home   = valid['FTHG'].mean()
+    avg_away   = valid['FTAG'].mean()
+
+    print(f"  • เหย้าชนะ      : {home_wins:,} นัด ({home_wins/total_v*100:.1f}%)")
+    print(f"  • เสมอ          : {draws:,} นัด ({draws/total_v*100:.1f}%)")
+    print(f"  • เยือนชนะ      : {away_wins:,} นัด ({away_wins/total_v*100:.1f}%)")
+    print(f"  • เฉลี่ยประตู/นัด: {avg_goals:.2f} ประตู  (เหย้า {avg_home:.2f} | เยือน {avg_away:.2f})")
+
+    # ทีมที่ยิงได้มากที่สุด
+    goals_scored = valid.groupby('HomeTeam')['FTHG'].sum() + valid.groupby('AwayTeam')['FTAG'].sum()
+    goals_conceded = valid.groupby('HomeTeam')['FTAG'].sum() + valid.groupby('AwayTeam')['FTHG'].sum()
+    top_scorer   = goals_scored.idxmax()
+    top_conceded = goals_conceded.idxmax()
+    print(f"  • ทีมยิงมากสุด  : {top_scorer} ({int(goals_scored[top_scorer])} ประตู)")
+    print(f"  • ทีมเสียมากสุด : {top_conceded} ({int(goals_conceded[top_conceded])} ประตู)")
+
+    # ── 6. สรุปโมเดล & คำแนะนำ ───────────────────────────────────
+    print()
+    print(SEP)
+    print("  💡  6. สรุปและคำแนะนำ")
+    print(SEP)
+    print(f"  • โมเดล Ensemble (LR + RF + XGB) ทำได้ {acc}% accuracy")
+    print(f"  • ทำนาย Home Win ได้ดีที่สุด (F1 ≈ {report['Home Win']['f1-score']:.2f})")
+    print(f"  • ทำนาย Draw ได้ยากที่สุด (F1 ≈ {report['Draw']['f1-score']:.2f}) — เป็นปัญหาปกติของ ML ฟุตบอล")
+    print(f"  • ใช้ {len(FEATURES)} features: Rolling form, Elo, H2H, CS rate, Scoring rate")
+    print(f"  • ข้อแนะนำ: เพิ่มข้อมูล (injury, weather, referee) จะช่วยเพิ่ม accuracy ได้")
+
+    print()
+    print("█" * 65)
+    print("  ✅  END OF REPORT")
+    print("█" * 65)
+    print()
+
+
+# ── STEP 3: แสดงสรุปทั้งหมด ──
+print_full_summary()
