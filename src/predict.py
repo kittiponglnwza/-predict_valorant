@@ -456,18 +456,58 @@ def predict_score(home_team, away_team, ctx):
 
 
 # ══════════════════════════════════════════════════════════════
-# LAST 5 RESULTS
+# LAST 5 RESULTS (Live API Data Version)
 # ══════════════════════════════════════════════════════════════
 
 def get_last_5_results(team, ctx):
-    data  = ctx['data']
+    import pandas as pd
+    import os, glob as _glob
+    from src.config import DATA_DIR
+
+    # ── โหลดทุก CSV ใน DATA_DIR (เหมือน load_data) เพื่อให้ได้ข้อมูลล่าสุด ──
+    # ไม่ hardcode ชื่อไฟล์ เพราะชื่ออาจเป็น "season 2025.csv" หรือ "season_2025.csv"
+    try:
+        csv_files = [f for f in _glob.glob(os.path.join(DATA_DIR, "*.csv"))
+                     if 'backup' not in f.lower()]
+        if csv_files:
+            dfs = []
+            for f in csv_files:
+                try:
+                    _df = pd.read_csv(f)
+                    _df['FTHG'] = pd.to_numeric(_df['FTHG'], errors='coerce')
+                    _df['FTAG'] = pd.to_numeric(_df['FTAG'], errors='coerce')
+                    _df['Date'] = pd.to_datetime(_df['Date'], dayfirst=True, errors='coerce')
+                    dfs.append(_df)
+                except Exception:
+                    pass
+            data = pd.concat(dfs, ignore_index=True)
+            data = data.drop_duplicates(subset=['Date','HomeTeam','AwayTeam'], keep='last')
+            data = data.sort_values('Date').reset_index(drop=True)
+            print(f"  ✅  โหลดข้อมูลสด {len(data)} แมตช์จาก {len(csv_files)} ไฟล์")
+        else:
+            # fallback: ใช้ ctx['data']
+            data = ctx['data'].copy()
+            data['Date'] = pd.to_datetime(data['Date'], errors='coerce')
+            data['FTHG'] = pd.to_numeric(data['FTHG'], errors='coerce')
+            data['FTAG'] = pd.to_numeric(data['FTAG'], errors='coerce')
+    except Exception as _e:
+        print(f"  ⚠️  โหลด CSV ล้มเหลว: {_e} — ใช้ ctx['data'] แทน")
+        data = ctx['data'].copy()
+        data['Date'] = pd.to_datetime(data['Date'], errors='coerce')
+        data['FTHG'] = pd.to_numeric(data['FTHG'], errors='coerce')
+        data['FTAG'] = pd.to_numeric(data['FTAG'], errors='coerce')
+
     valid = data.dropna(subset=['FTHG', 'FTAG']).copy()
 
+    # ดึงฟอร์มตอนเป็นทีมเหย้า
     hm = valid[valid['HomeTeam'] == team][['Date','HomeTeam','AwayTeam','FTHG','FTAG']].copy()
     hm['Venue'] = 'H'; hm['GF'] = hm['FTHG']; hm['GA'] = hm['FTAG']; hm['Opponent'] = hm['AwayTeam']
+    
+    # ดึงฟอร์มตอนเป็นทีมเยือน
     am = valid[valid['AwayTeam'] == team][['Date','HomeTeam','AwayTeam','FTHG','FTAG']].copy()
     am['Venue'] = 'A'; am['GF'] = am['FTAG']; am['GA'] = am['FTHG']; am['Opponent'] = am['HomeTeam']
 
+    # นำมารวมกันแล้วเรียงวันที่จากปัจจุบันย้อนกลับไปในอดีต
     all_m = pd.concat([hm, am]).sort_values('Date', ascending=False).head(5)
 
     def rl(r):
@@ -477,6 +517,7 @@ def get_last_5_results(team, ctx):
     all_m['Result'] = all_m.apply(rl, axis=1)
     icon_map = {'W': '✅ ชนะ', 'D': '🟡 เสมอ', 'L': '❌ แพ้'}
 
+    # แสดงผลใน Terminal
     print(f"\n{'='*58}\n  📋  5 แมตช์ล่าสุดของ {team}\n{'='*58}")
     print(f"  {'วันที่':<13} {'คู่แข่ง':<22} {'สนาม':<6} {'สกอร์':<10} {'ผล'}")
     print(f"  {'─'*55}")
@@ -486,6 +527,7 @@ def get_last_5_results(team, ctx):
         venue_th = 'เหย้า' if row['Venue'] == 'H' else 'เยือน'
         print(f"  {ds:<13} {str(row['Opponent']):<22} {venue_th:<6} {sc:<10} {icon_map[row['Result']]}")
     print(f"{'='*58}")
+    
     return all_m
 
 

@@ -40,22 +40,18 @@ st.set_page_config(
 # ── 2. Modern Cyber Sports CSS ────────────────────────────────
 st.markdown("""
 <style>
-    /* ซ่อน UI เริ่มต้นของ Streamlit */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
     
-    /* นำเข้าฟอนต์ให้ดูทันสมัยขึ้น */
     @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
     
-    /* ตั้งค่าพื้นหลังหลัก (Dark Blue/Navy) */
     .stApp { 
         background-color: #0B0F19; 
         color: #E2E8F0;
         font-family: 'Plus Jakarta Sans', sans-serif;
     }
     
-    /* สไตล์ของ Metrics Card (มีมิติและ Glow Effect) */
     div[data-testid="metric-container"] {
         background: linear-gradient(145deg, #151B2B, #0B0F19);
         border: 1px solid #2A3441;
@@ -71,7 +67,6 @@ st.markdown("""
         border-color: #00B0FF;
     }
     
-    /* เปลี่ยนสีตัวหนังสือใน Metrics */
     div[data-testid="stMetricValue"] {
         color: #FFFFFF !important;
         font-weight: 700 !important;
@@ -83,7 +78,6 @@ st.markdown("""
         font-size: 1rem !important;
     }
     
-    /* สไตล์ของ Tabs ให้เหมือน Segmented Controls ของ iOS */
     .stTabs [data-baseweb="tab-list"] {
         background-color: #111622;
         border-radius: 12px;
@@ -107,7 +101,6 @@ st.markdown("""
         box-shadow: 0 2px 8px rgba(0,0,0,0.2);
     }
     
-    /* สไตล์ของ Buttons */
     .stButton>button {
         background: linear-gradient(90deg, #00B0FF 0%, #0081CB 100%);
         color: white;
@@ -124,7 +117,6 @@ st.markdown("""
         background: linear-gradient(90deg, #1AD6FF 0%, #00B0FF 100%);
     }
     
-    /* ปรับปรุงพื้นหลัง Sidebar */
     [data-testid="stSidebar"] {
         background-color: #0E131F !important;
         border-right: 1px solid #1F2937;
@@ -247,7 +239,7 @@ def render_sidebar(ctx):
         st.caption("FOOTBALL AI v9.0")
         st.divider()
         
-        # เชื่อมตัวแปรการเปลี่ยนหน้าด้วย st.session_state
+        # เชื่อม Sidebar กับ session_state
         page = st.radio("Navigation", [
             "Overview", "Predict Match", "Next Fixtures",
             "Season Table", "Analysis", "Update Data",
@@ -265,8 +257,6 @@ def render_sidebar(ctx):
         st.write("")
         st.caption(f"**Features:** `{len(ctx['FEATURES'])}` | **xG:** `{'Active' if ctx['XG_AVAILABLE'] else 'Inactive'}`")
         st.caption(f"**T_Home:** `{ctx['OPT_T_HOME']:.2f}` | **T_Draw:** `{ctx['OPT_T_DRAW']:.2f}`")
-        
-    return page
 
 
 # ── Pages ─────────────────────────────────────────────────────
@@ -313,20 +303,21 @@ def page_predict(ctx):
     # ดึงค่าที่รับมาจากหน้า Fixtures (ถ้ามี)
     default_h = st.session_state.get('pred_home', "Arsenal")
     if default_h not in all_teams: default_h = all_teams[0]
+    
     default_a = st.session_state.get('pred_away', "Chelsea")
+    if default_a not in all_teams: default_a = all_teams[1]
     
     with st.container():
         c1, c2 = st.columns(2, gap="medium")
         home = c1.selectbox("🏠 Home Team", all_teams, index=all_teams.index(default_h))
         
         away_opts = [t for t in all_teams if t != home]
-        if default_a not in away_opts: default_a = away_opts[0]
-        
-        away = c2.selectbox("✈️ Away Team", away_opts, index=away_opts.index(default_a))
+        idx_a = away_opts.index(default_a) if default_a in away_opts else 0
+        away = c2.selectbox("✈️ Away Team", away_opts, index=idx_a)
 
     st.write("")
     
-    # ถ้ารับคำสั่งให้วิเคราะห์อัตโนมัติมาจากหน้าตาราง
+    # ถ้ารับคำสั่งให้วิเคราะห์อัตโนมัติมาจากหน้าตาราง ให้ pop ค่าออกเพื่อไม่ให้ค้าง
     auto_run = st.session_state.pop('auto_predict', False)
     
     if st.button("🚀 Generate Prediction", type="primary", use_container_width=True) or auto_run:
@@ -364,74 +355,91 @@ def page_predict(ctx):
                     st.dataframe(df_scores, hide_index=True, use_container_width=True)
                     
         st.divider()
-        st.subheader("Recent Form (Last 5 Matches)")
+
+        # ── โหลดข้อมูลสดจาก CSV โดยตรง (ไม่พึ่ง ctx['data'] ที่ค้างตั้งแต่ app start) ──
+        @st.cache_data(ttl=300)
+        def _load_fresh_match_data():
+            import glob as _g
+            dfs = []
+            for f in _g.glob(os.path.join(DATA_DIR, "*.csv")):
+                if 'backup' in f.lower():
+                    continue
+                try:
+                    _df = pd.read_csv(f)
+                    _df['FTHG'] = pd.to_numeric(_df['FTHG'], errors='coerce')
+                    _df['FTAG'] = pd.to_numeric(_df['FTAG'], errors='coerce')
+                    _df['Date'] = pd.to_datetime(_df['Date'], dayfirst=True, errors='coerce')
+                    dfs.append(_df)
+                except Exception:
+                    pass
+            if not dfs:
+                return pd.DataFrame()
+            combined = pd.concat(dfs, ignore_index=True)
+            combined = combined.drop_duplicates(subset=['Date','HomeTeam','AwayTeam'], keep='last')
+            return combined.dropna(subset=['FTHG','FTAG']).sort_values('Date').reset_index(drop=True)
+
+        def _get_team_form(team, valid_data):
+            hm = valid_data[valid_data['HomeTeam'] == team].copy()
+            hm['Venue'] = 'H'; hm['GF'] = hm['FTHG']; hm['GA'] = hm['FTAG']; hm['Opponent'] = hm['AwayTeam']
+            am = valid_data[valid_data['AwayTeam'] == team].copy()
+            am['Venue'] = 'A'; am['GF'] = am['FTAG']; am['GA'] = am['FTHG']; am['Opponent'] = am['HomeTeam']
+            all_m = pd.concat([hm, am]).sort_values('Date', ascending=False).head(5)
+            def rl(r):
+                if r['GF'] > r['GA']: return 'W'
+                elif r['GF'] == r['GA']: return 'D'
+                else: return 'L'
+            all_m['Result'] = all_m.apply(rl, axis=1)
+            return all_m
+
+        fresh_data = _load_fresh_match_data()
+        latest_date = fresh_data['Date'].max() if len(fresh_data) > 0 else None
+
+        rcol1, rcol2 = st.columns([5, 1])
+        rcol1.subheader("Recent Form (Last 5 Matches)")
+        if latest_date is not None and pd.notna(latest_date):
+            rcol1.caption(f"แมตช์ล่าสุดใน CSV: **{latest_date.strftime('%d %b %Y')}**")
+
+        if rcol2.button("\U0001f504 Refresh", help="ดึงข้อมูลแมตช์ล่าสุดจาก API"):
+            with st.spinner("กำลัง sync ข้อมูล..."):
+                try:
+                    import io, contextlib
+                    buf = io.StringIO()
+                    with contextlib.redirect_stdout(buf):
+                        result = update_season_csv_from_api()
+                    if result is not None:
+                        result['FTHG'] = pd.to_numeric(result['FTHG'], errors='coerce')
+                        st.success(f"\u2705 Sync สำเร็จ! มีแมตช์ที่เตะแล้ว {result['FTHG'].notna().sum()} นัด")
+                    else:
+                        st.error(f"\u274c Sync ล้มเหลว\n```\n{buf.getvalue()}\n```")
+                except Exception as _e:
+                    st.error(f"\u274c Error: {_e}")
+            st.cache_data.clear()
+            st.rerun()
+
         ch, ca = st.columns(2, gap="large")
         for team, col in [(home, ch), (away, ca)]:
             with col:
                 st.markdown(f"**{team}**")
-                try:
-                    lr = _silent(get_last_5_results, team, ctx)
-                    if lr is not None:
-                        d = lr[['Date','Opponent','Venue','GF','GA','Result']].copy()
+                if len(fresh_data) > 0:
+                    try:
+                        d = _get_team_form(team, fresh_data)
+                        d = d[['Date','Opponent','Venue','GF','GA','Result']].copy()
                         d['Date'] = d['Date'].dt.strftime('%d/%m/%y')
                         st.dataframe(d, hide_index=True, use_container_width=True)
-                except Exception as e:
+                    except Exception:
+                        st.warning("No recent data available.")
+                else:
                     st.warning("No recent data available.")
 
-# เพิ่มฟังก์ชันนี้ไว้เหนือ page_fixtures สำหรับจัดการการเปลี่ยนหน้า
+
+# ── ฟังก์ชันนี้ใช้สำหรับเปลี่ยนหน้าจากปุ่มตาราง ──
 def navigate_to_predict(home_team, away_team):
     st.session_state['nav_page'] = "Predict Match"
     st.session_state['pred_home'] = home_team
     st.session_state['pred_away'] = away_team
     st.session_state['auto_predict'] = True
 
-def page_fixtures(ctx):
-    st.title("Upcoming Fixtures")
-    
-    c1, c2 = st.columns([1, 3])
-    n = c1.number_input("Number of matches to fetch", min_value=1, max_value=20, value=5)
-    
-    st.write("")
-    if st.button("📡 Fetch Fixtures", type="primary"):
-        with st.spinner("Fetching data from API..."):
-            upcoming = _silent(show_next_pl_fixtures, ctx, num_matches=n)
-            
-        if upcoming:
-            st.write("")
-            st.markdown("### 🏟️ Select Match to Analyze")
-            
-            h1, h2, h3, h4, h5 = st.columns([1.5, 3.5, 3, 1.5, 1.5])
-            h1.markdown("⏱️ **Date / Time**")
-            h2.markdown("⚔️ **Match**")
-            h3.markdown("📊 **Win Prob (H - D - A)**")
-            h4.markdown("⚽ **Exp. Score**")
-            h5.markdown("⚡ **Action**")
-            st.divider()
-            
-            for i, f in enumerate(upcoming):
-                r = _silent(predict_match, f['HomeTeam'], f['AwayTeam'], ctx)
-                s = _silent(predict_score, f['HomeTeam'], f['AwayTeam'], ctx)
-                
-                if r and s:
-                    c1, c2, c3, c4, c5 = st.columns([1.5, 3.5, 3, 1.5, 1.5])
-                    c1.caption(f"{f['Date']}  \n{f.get('Time','')}")
-                    c2.markdown(f"🏠 **{f['HomeTeam']}** \n✈️ **{f['AwayTeam']}**")
-                    c3.caption(f"H: **{r['Home Win']}%** | D: **{r['Draw']}%** | A: **{r['Away Win']}%**")
-                    c4.markdown(f"**{s['most_likely_score']}**")
-                    
-                    # แก้ไขปุ่มกด โดยใช้ on_click และโยนชื่อทีมผ่าน args
-                    c5.button(
-                        "🎯 Predict", 
-                        key=f"btn_pred_{i}", 
-                        use_container_width=True,
-                        on_click=navigate_to_predict,
-                        args=(f['HomeTeam'], f['AwayTeam'])
-                    )
-                    st.markdown("<hr style='margin: 0.5em 0; opacity: 0.15;'>", unsafe_allow_html=True)
-        else:
-            st.error("Unable to fetch upcoming fixtures.")
-            
-        
+
 def page_fixtures(ctx):
     st.title("Upcoming Fixtures")
     
@@ -476,14 +484,15 @@ def page_fixtures(ctx):
                     # สกอร์ที่คาด
                     c4.markdown(f"**{s['most_likely_score']}**")
                     
-                    # ปุ่ม Action สำหรับพาไปหน้า Predict
-                    if c5.button("🎯 Predict", key=f"btn_pred_{i}", use_container_width=True):
-                        st.session_state['nav_page'] = "Predict Match"
-                        st.session_state['pred_home'] = f['HomeTeam']
-                        st.session_state['pred_away'] = f['AwayTeam']
-                        st.session_state['auto_predict'] = True # สั่งให้รันอัตโนมัติ
-                        st.rerun() # รีเฟรชหน้าเว็บเพื่อให้สลับหน้าทันที
-                        
+                    # ปุ่ม Action สำหรับพาไปหน้า Predict (ใช้ on_click แบบถูกต้อง)
+                    c5.button(
+                        "🎯 Predict", 
+                        key=f"btn_pred_{i}", 
+                        use_container_width=True,
+                        on_click=navigate_to_predict,
+                        args=(f['HomeTeam'], f['AwayTeam'])
+                    )
+                    
                     # เส้นคั่นบางๆ ระหว่างแถว
                     st.markdown("<hr style='margin: 0.5em 0; opacity: 0.15;'>", unsafe_allow_html=True)
         else:
@@ -620,7 +629,9 @@ if 'ctx' not in st.session_state:
     st.session_state['ctx'] = load_or_train()
 
 ctx  = st.session_state['ctx']
-page = render_sidebar(ctx)
+
+# เรนเดอร์ Sidebar
+render_sidebar(ctx)
 
 pages = {
     "Overview":       page_overview,
@@ -631,6 +642,6 @@ pages = {
     "Update Data":    page_update,
 }
 
-# ดึงชื่อหน้าจาก session_state แทน (เพื่อรองรับการเปลี่ยนหน้าจากปุ่ม)
+# ดึงชื่อหน้าจาก session_state มาใช้ และรันฟังก์ชันของหน้านั้น
 active_page = st.session_state.get('nav_page', "Overview")
 pages[active_page](ctx)
