@@ -413,11 +413,11 @@ def predict_match(home_team, away_team, model_path="model/football_model.pkl"):
 
 
 # ==============================
-# 13) SEASON SIMULATION 2025-26 (FIXED)
+# 13) SEASON SIMULATION 2025-26 (FIXED v2)
 # ==============================
-# ปัญหาเดิม: season 2025.csv มีแมตช์ปี 2026 ปนอยู่
-# แก้: แยก "แมตช์แข่งแล้ว" (มีผล FTHG/FTAG จริง)
-#      vs "แมตช์ยังไม่แข่ง" (FTHG เป็น NaN หรือวันในอนาคต)
+# แก้ปัญหา: football-data.co.uk ไม่มีนัดอนาคตในไฟล์
+# วิธีแก้: สร้าง remaining fixtures อัตโนมัติจากคู่ที่ยังไม่ได้แข่ง
+#          แล้วใช้ฟอร์มล่าสุดของแต่ละทีมทำนายผล
 
 import datetime
 TODAY = pd.Timestamp(datetime.date.today())
@@ -425,25 +425,30 @@ TODAY = pd.Timestamp(datetime.date.today())
 season_file = pd.read_csv("data_set/season 2025.csv")
 season_file['Date'] = pd.to_datetime(season_file['Date'], dayfirst=True)
 
-# ✅ แมตช์ที่แข่งแล้ว = มีผลจริง (FTHG ไม่ใช่ NaN)
-played   = season_file.dropna(subset=['FTHG', 'FTAG']).copy()
-played   = played[played['Date'] <= TODAY]
+# แมตช์ที่แข่งแล้ว = มีผลจริง (FTHG ไม่ใช่ NaN)
+played = season_file.dropna(subset=['FTHG', 'FTAG']).copy()
+played = played[played['Date'] <= TODAY]
 
-# ⏳ แมตช์ที่ยังไม่แข่ง = FTHG เป็น NaN หรือวันหน้า
-unplayed = season_file[
-    season_file['FTHG'].isna() | (season_file['Date'] > TODAY)
-].copy()
+# สร้าง remaining fixtures อัตโนมัติ
+season_teams = list(set(season_file['HomeTeam'].tolist() + season_file['AwayTeam'].tolist()))
+played_pairs = set(zip(played['HomeTeam'], played['AwayTeam']))
+remaining_fixtures = [
+    {'HomeTeam': h, 'AwayTeam': a}
+    for h in season_teams for a in season_teams
+    if h != a and (h, a) not in played_pairs
+]
+unplayed = pd.DataFrame(remaining_fixtures)
 
 print(f"\n📅 วันนี้: {TODAY.date()}")
 print(f"✅ แมตช์แข่งแล้ว:    {len(played)} นัด")
-print(f"⏳ แมตช์ยังไม่แข่ง: {len(unplayed)} นัด")
+print(f"⏳ แมตช์ยังไม่แข่ง: {len(unplayed)} นัด (สร้างจาก remaining fixtures อัตโนมัติ)")
 print(f"   รวม: {len(played) + len(unplayed)} นัด (ฤดูกาล 38 นัด × 20 ทีม = 380 นัด)")
 
-# --- คะแนนจริงจากแมตช์ที่แข่งแล้ว ---
+# คะแนนจริงจากแมตช์ที่แข่งแล้ว
 real_table = {}
 for _, row in played.iterrows():
     home, away = row['HomeTeam'], row['AwayTeam']
-    hg, ag     = int(row['FTHG']), int(row['FTAG'])
+    hg, ag = int(row['FTHG']), int(row['FTAG'])
     for t in [home, away]:
         if t not in real_table: real_table[t] = 0
     if hg > ag:   real_table[home] += 3
@@ -452,32 +457,68 @@ for _, row in played.iterrows():
         real_table[home] += 1
         real_table[away] += 1
 
-real_table_df = pd.DataFrame.from_dict(
-    real_table, orient='index', columns=['RealPoints']
-)
+real_table_df = pd.DataFrame.from_dict(real_table, orient='index', columns=['RealPoints'])
 
-# --- ทำนายแมตช์ที่ยังไม่แข่ง ---
-# ใช้ match_df ที่มี rolling features ครบ กรอง Date > TODAY
-future_matches = match_df[match_df['Date_x'] > TODAY].copy()
+# ทำนาย remaining fixtures โดยสร้าง features จากฟอร์มล่าสุดของแต่ละทีม
+def get_latest_features(team, is_home):
+    if is_home:
+        rows = match_df[match_df['HomeTeam'] == team].sort_values('Date_x')
+        if len(rows) > 0:
+            last = rows.iloc[-1]
+            return {'GF5': last['H_GF5'], 'GA5': last['H_GA5'],
+                    'Pts5': last['H_Pts5'], 'Streak3': last['H_Streak3'],
+                    'Win5': last['H_Win5'], 'CS5': last['H_CS5']}
+    rows = match_df[match_df['AwayTeam'] == team].sort_values('Date_x')
+    if len(rows) > 0:
+        last = rows.iloc[-1]
+        return {'GF5': last['A_GF5'], 'GA5': last['A_GA5'],
+                'Pts5': last['A_Pts5'], 'Streak3': last['A_Streak3'],
+                'Win5': last['A_Win5'], 'CS5': last['A_CS5']}
+    return {'GF5': 1.5, 'GA5': 1.5, 'Pts5': 1.5, 'Streak3': 1.5, 'Win5': 0.5, 'CS5': 0.2}
+
 pred_table = {}
 
-if len(future_matches) > 0:
-    X_future = scaler.transform(future_matches[FEATURES])
-    future_matches = future_matches.copy()
-    future_matches['Pred'] = ensemble.predict(X_future)
-    print(f"🤖 ทำนาย {len(future_matches)} แมตช์ที่เหลือ")
+if len(unplayed) > 0:
+    future_rows = []
+    for _, match in unplayed.iterrows():
+        home, away = match['HomeTeam'], match['AwayTeam']
+        h = get_latest_features(home, is_home=True)
+        a = get_latest_features(away, is_home=False)
+        h_elo = final_elo.get(home, 1500)
+        a_elo = final_elo.get(away, 1500)
+        h2h_rows = match_df[(match_df['HomeTeam'] == home) & (match_df['AwayTeam'] == away)]
+        h2h_rate = h2h_rows['H2H_HomeWinRate'].iloc[-1] if len(h2h_rows) > 0 else 0.33
+        future_rows.append({
+            'HomeTeam': home, 'AwayTeam': away,
+            'Diff_Pts':    h['Pts5']    - a['Pts5'],
+            'Diff_GF':     h['GF5']     - a['GF5'],
+            'Diff_GA':     h['GA5']     - a['GA5'],
+            'Diff_Win':    h['Win5']    - a['Win5'],
+            'Diff_CS':     h['CS5']     - a['CS5'],
+            'Diff_Streak': h['Streak3'] - a['Streak3'],
+            'Diff_Elo':    h_elo - a_elo,
+            'H2H_HomeWinRate': h2h_rate,
+            'H_GF5': h['GF5'], 'H_GA5': h['GA5'],
+            'H_Pts5': h['Pts5'], 'H_Streak3': h['Streak3'],
+            'A_GF5': a['GF5'], 'A_GA5': a['GA5'],
+            'A_Pts5': a['Pts5'], 'A_Streak3': a['Streak3'],
+        })
 
-    for _, row in future_matches.iterrows():
+    future_df = pd.DataFrame(future_rows)
+    X_future = scaler.transform(future_df[FEATURES])
+    future_df['Pred'] = ensemble.predict(X_future)
+    print(f"🤖 ทำนาย {len(future_df)} แมตช์ที่เหลือ")
+
+    for _, row in future_df.iterrows():
         home, away = row['HomeTeam'], row['AwayTeam']
-        pred       = row['Pred']
+        pred = row['Pred']
         for t in [home, away]:
             if t not in pred_table: pred_table[t] = 0
         if pred == 2:   pred_table[home] += 3
         elif pred == 1: pred_table[home] += 1; pred_table[away] += 1
         else:           pred_table[away] += 3
 else:
-    print("ℹ️  ไม่มีแมตช์ที่เหลือให้ทำนาย (จบฤดูกาลแล้ว)")
-
+    print("ℹ️  ฤดูกาลจบแล้ว ไม่มีแมตช์ที่เหลือ")
 pred_table_df = pd.DataFrame.from_dict(
     pred_table, orient='index', columns=['PredictedPoints']
 )
@@ -509,52 +550,45 @@ print(f"  🔴 = Top 3 (UEFA CL)  |  🟡 = Relegation Zone")
 # predict_match("Man City", "Arsenal")
 # predict_match("Liverpool", "Chelsea")
 
-
 # ==============================
 # 15) GET LAST 5 RESULTS (ผลย้อนหลัง 5 แมตช์)
 # ==============================
 
 def get_last_5_results(team):
-    """
-    แสดงผล 5 แมตช์ล่าสุดของทีม
-    Returns: DataFrame พร้อม print สวยงาม
-    """
-    # หาแมตช์ทั้งหมดที่ทีมเล่น (ทั้งเหย้าและเยือน)
-    home_matches = data[data['HomeTeam'] == team][['Date', 'HomeTeam', 'AwayTeam', 'FTHG', 'FTAG']].copy()
-    home_matches['Venue'] = 'H'
-    home_matches['GF'] = home_matches['FTHG']
-    home_matches['GA'] = home_matches['FTAG']
+    home_matches = data[data['HomeTeam'] == team][['Date','HomeTeam','AwayTeam','FTHG','FTAG']].copy()
+    home_matches['Venue']    = 'H'
+    home_matches['GF']       = home_matches['FTHG']
+    home_matches['GA']       = home_matches['FTAG']
     home_matches['Opponent'] = home_matches['AwayTeam']
 
-    away_matches = data[data['AwayTeam'] == team][['Date', 'HomeTeam', 'AwayTeam', 'FTHG', 'FTAG']].copy()
-    away_matches['Venue'] = 'A'
-    away_matches['GF'] = away_matches['FTAG']
-    away_matches['GA'] = away_matches['FTHG']
+    away_matches = data[data['AwayTeam'] == team][['Date','HomeTeam','AwayTeam','FTHG','FTAG']].copy()
+    away_matches['Venue']    = 'A'
+    away_matches['GF']       = away_matches['FTAG']
+    away_matches['GA']       = away_matches['FTHG']
     away_matches['Opponent'] = away_matches['HomeTeam']
 
     all_matches = pd.concat([home_matches, away_matches]).sort_values('Date', ascending=False)
     last5 = all_matches.head(5).copy()
 
-    def get_result_label(row):
-        if row['GF'] > row['GA']:   return 'W'
+    def result_label(row):
+        if   row['GF'] > row['GA']: return 'W'
         elif row['GF'] == row['GA']: return 'D'
         else:                        return 'L'
 
-    last5['Result'] = last5.apply(get_result_label, axis=1)
+    last5['Result'] = last5.apply(result_label, axis=1)
 
-    print(f"\n{'='*55}")
+    icon_map = {'W': '✅ ชนะ', 'D': '🟡 เสมอ', 'L': '❌ แพ้'}
+    print(f"\n{'='*58}")
     print(f"  📋  5 แมตช์ล่าสุดของ {team}")
-    print(f"{'='*55}")
-    print(f"  {'วันที่':<12} {'คู่แข่ง':<22} {'H/A':<5} {'สกอร์':<10} {'ผล'}")
-    print(f"  {'─'*52}")
+    print(f"{'='*58}")
+    print(f"  {'วันที่':<13} {'คู่แข่ง':<22} {'สนาม':<6} {'สกอร์':<10} {'ผล'}")
+    print(f"  {'─'*55}")
     for _, row in last5.iterrows():
-        icon = {'W': '✅', 'D': '🟡', 'L': '❌'}[row['Result']]
         date_str = row['Date'].strftime('%d/%m/%Y') if pd.notna(row['Date']) else 'N/A'
-        score = f"{int(row['GF'])}-{int(row['GA'])}"
-        print(f"  {date_str:<12} {row['Opponent']:<22} {row['Venue']:<5} {score:<10} {icon} {row['Result']}")
-    print(f"{'='*55}")
-
-    return last5[['Date', 'Opponent', 'Venue', 'GF', 'GA', 'Result']]
+        score    = f"{int(row['GF'])}-{int(row['GA'])}"
+        print(f"  {date_str:<13} {str(row['Opponent']):<22} {'เหย้า' if row['Venue']=='H' else 'เยือน':<6} {score:<10} {icon_map[row['Result']]}")
+    print(f"{'='*58}")
+    return last5[['Date','Opponent','Venue','GF','GA','Result']]
 
 
 # ==============================
@@ -562,237 +596,427 @@ def get_last_5_results(team):
 # ==============================
 
 def predict_score(home_team, away_team):
-    """
-    ทำนายสกอร์ที่น่าจะเป็น โดยใช้ฟอร์มเฉลี่ยล่าสุด
-    คำนวณจาก Expected Goals (xG) อย่างง่าย แล้วคำนวณ Poisson probability
-
-    Returns:
-        dict: { 'home_xg', 'away_xg', 'most_likely_score', 'score_probabilities' (top 5) }
-    """
     from scipy.stats import poisson
 
     teams_in_data = set(match_df['HomeTeam'].tolist() + match_df['AwayTeam'].tolist())
     if home_team not in teams_in_data:
-        print(f"❌ ไม่พบทีม '{home_team}' ในข้อมูล")
-        return None
+        print(f"❌ ไม่พบทีม '{home_team}'"); return None
     if away_team not in teams_in_data:
-        print(f"❌ ไม่พบทีม '{away_team}' ในข้อมูล")
-        return None
+        print(f"❌ ไม่พบทีม '{away_team}'"); return None
 
-    # ดึงฟอร์มล่าสุด (ค่าเฉลี่ยประตูย้อนหลัง 5 แมตช์)
-    def get_team_avg(team, is_home):
+    def get_avg(team, is_home):
         if is_home:
             rows = match_df[match_df['HomeTeam'] == team].sort_values('Date_x')
             if len(rows) > 0:
                 last = rows.iloc[-1]
                 return last['H_GF5'], last['H_GA5']
-        else:
-            rows = match_df[match_df['AwayTeam'] == team].sort_values('Date_x')
-            if len(rows) > 0:
-                last = rows.iloc[-1]
-                return last['A_GF5'], last['A_GA5']
-        return 1.5, 1.5  # default
+        rows = match_df[match_df['AwayTeam'] == team].sort_values('Date_x')
+        if len(rows) > 0:
+            last = rows.iloc[-1]
+            return last['A_GF5'], last['A_GA5']
+        return 1.5, 1.5
 
-    h_gf_avg, h_ga_avg = get_team_avg(home_team, is_home=True)
-    a_gf_avg, a_ga_avg = get_team_avg(away_team, is_home=False)
+    h_gf, h_ga = get_avg(home_team, True)
+    a_gf, a_ga = get_avg(away_team, False)
 
-    # xG โดยประมาณ: ค่าเฉลี่ยของ attack ทีมนั้น vs defense ฝั่งตรงข้าม
-    # normalize ด้วย league average
-    league_avg_goals = data['FTHG'].mean() + data['FTAG'].mean()
-    league_avg_home  = data['FTHG'].mean()
-    league_avg_away  = data['FTAG'].mean()
+    lg_home = data['FTHG'].mean()
+    lg_away = data['FTAG'].mean()
 
-    home_attack  = h_gf_avg / league_avg_home if league_avg_home > 0 else 1.0
-    home_defense = h_ga_avg / league_avg_away if league_avg_away > 0 else 1.0
-    away_attack  = a_gf_avg / league_avg_away if league_avg_away > 0 else 1.0
-    away_defense = a_ga_avg / league_avg_home if league_avg_home > 0 else 1.0
+    home_xg = (h_gf / lg_home) * (a_ga / lg_home) * lg_home
+    away_xg = (a_gf / lg_away) * (h_ga / lg_away) * lg_away
 
-    home_xg = home_attack * away_defense * league_avg_home
-    away_xg = away_attack * home_defense * league_avg_away
-
-    # Poisson: คำนวณโอกาสแต่ละสกอร์
-    max_goals = 6
     score_probs = {}
-    for hg in range(max_goals + 1):
-        for ag in range(max_goals + 1):
-            prob = poisson.pmf(hg, home_xg) * poisson.pmf(ag, away_xg)
-            score_probs[f"{hg}-{ag}"] = round(prob * 100, 2)
+    for hg in range(7):
+        for ag in range(7):
+            score_probs[f"{hg}-{ag}"] = round(poisson.pmf(hg, home_xg) * poisson.pmf(ag, away_xg) * 100, 2)
 
-    # เรียงลำดับโอกาสสูงสุด
-    sorted_scores = sorted(score_probs.items(), key=lambda x: x[1], reverse=True)
-    top5_scores   = sorted_scores[:5]
-    best_score    = top5_scores[0][0]
+    top5 = sorted(score_probs.items(), key=lambda x: x[1], reverse=True)[:5]
 
-    print(f"\n{'='*55}")
-    print(f"  ⚽  ทำนายสกอร์: {home_team}  vs  {away_team}")
-    print(f"{'='*55}")
-    print(f"  📊 Expected Goals:  {home_team} {round(home_xg, 2)} xG  |  {away_team} {round(away_xg, 2)} xG")
-    print(f"  🎯 สกอร์ที่น่าจะเป็นที่สุด: {best_score}")
-    print(f"\n  {'สกอร์':<12} {'โอกาส (%)'}")
-    print(f"  {'─'*25}")
-    for score, pct in top5_scores:
+    print(f"\n  ⚽ xG คาด:  {home_team} {round(home_xg,2)}  vs  {away_team} {round(away_xg,2)}")
+    print(f"  🎯 สกอร์ที่น่าจะเป็น (Top 5):")
+    for score, pct in top5:
         bar = '█' * int(pct * 2)
-        print(f"  {score:<12} {bar:<20} {pct}%")
-    print(f"{'='*55}")
+        print(f"     {score:<8} {bar:<20} {pct}%")
 
-    return {
-        'home_xg':          round(home_xg, 2),
-        'away_xg':          round(away_xg, 2),
-        'most_likely_score': best_score,
-        'top5_scores':       top5_scores,
-    }
+    return {'home_xg': round(home_xg,2), 'away_xg': round(away_xg,2),
+            'most_likely_score': top5[0][0], 'top5_scores': top5}
 
 
 # ==============================
-# 17) PREDICT NEXT 5 MATCHES (ทำนาย 5 แมตช์ข้างหน้า)
+# 17) PREDICT NEXT 5 MATCHES (ฟังก์ชันหลัก)
 # ==============================
 
-def predict_next_5_matches(team, model_path="model/football_model.pkl"):
+def predict_next_5_matches(team, fixtures=None):
     """
-    ทำนาย 5 แมตช์ข้างหน้าของทีม พร้อม:
-    - เปอร์เซนต์ชนะ/เสมอ/แพ้
-    - สกอร์ที่น่าจะเป็น
-    - ผลย้อนหลัง 5 แมตช์
-
-    Parameters:
-        team (str): ชื่อทีม เช่น "Arsenal", "Man City"
-
-    Returns:
-        dict: { 'next_5_predictions': [...], 'last_5_results': DataFrame }
+    ทำนาย 5 แมตช์ข้างหน้าของทีม
+    
+    fixtures: list of dict ระบุตารางแข่งจริง (ถ้าไม่ใส่จะเดาเอง)
+    ตัวอย่าง:
+        fixtures = [
+            {'HomeTeam': 'Arsenal',  'AwayTeam': 'Chelsea'},
+            {'HomeTeam': 'Liverpool','AwayTeam': 'Arsenal'},
+        ]
     """
-    import datetime
-
-    print(f"\n{'#'*60}")
+    print(f"\n{'#'*62}")
     print(f"  🔮  วิเคราะห์ทีม: {team.upper()}")
-    print(f"{'#'*60}")
+    print(f"{'#'*62}")
 
-    # ─── STEP 1: ผลย้อนหลัง 5 แมตช์ ───
+    # ── ผลย้อนหลัง 5 แมตช์ ──
     last5_df = get_last_5_results(team)
 
-    # ─── STEP 2: หา 5 แมตช์ข้างหน้า ───
-    today = pd.Timestamp(datetime.date.today())
+    # ── หา 5 แมตช์ข้างหน้า ──
+    if fixtures:
+        # ใช้ตารางแข่งที่ user ระบุมา
+        next5 = [f for f in fixtures
+                 if f['HomeTeam'] == team or f['AwayTeam'] == team][:5]
+        print(f"  ✅ ใช้ตารางแข่งที่ระบุ ({len(next5)} นัด)")
+    else:
+        # fallback: เดาจาก remaining_fixtures (เรียงตามตัวอักษร ไม่มีวันที่)
+        next5 = [f for f in remaining_fixtures
+                 if f['HomeTeam'] == team or f['AwayTeam'] == team][:5]
+        print(f"  ⚠️  ไม่ได้ระบุตารางแข่ง → ใช้การเดาอัตโนมัติ (อาจไม่ตรงวันจริง)")
 
-    # ดึงจาก season file (แมตช์ที่ยังไม่แข่ง)
-    season_file_reload = pd.read_csv("data_set/season 2025.csv")
-    season_file_reload['Date'] = pd.to_datetime(season_file_reload['Date'], dayfirst=True)
-
-    upcoming = season_file_reload[
-        ((season_file_reload['HomeTeam'] == team) | (season_file_reload['AwayTeam'] == team)) &
-        (season_file_reload['FTHG'].isna() | (season_file_reload['Date'] > today))
-    ].sort_values('Date').head(5)
-
-    # fallback: ถ้าไม่มีใน season file ให้ใช้ match_df แมตช์ล่าสุด 5 นัด
-    if len(upcoming) == 0:
-        upcoming_from_match = match_df[
-            ((match_df['HomeTeam'] == team) | (match_df['AwayTeam'] == team)) &
-            (match_df['Date_x'] > today)
-        ].sort_values('Date_x').head(5)
-        if len(upcoming_from_match) > 0:
-            upcoming = upcoming_from_match[['Date_x', 'HomeTeam', 'AwayTeam']].rename(
-                columns={'Date_x': 'Date'}
-            )
-
-    if len(upcoming) == 0:
-        print(f"\n⚠️  ไม่พบแมตช์ข้างหน้าของ {team} ในข้อมูล")
-        print(f"   อาจเป็นเพราะข้อมูลฤดูกาลครบแล้ว หรือชื่อทีมไม่ตรง")
+    if not next5:
+        print(f"\n⚠️  ไม่พบแมตช์ข้างหน้าของ {team}")
         return None
 
-    print(f"\n{'='*60}")
+    print(f"\n{'='*62}")
     print(f"  🔮  5 แมตช์ข้างหน้า: {team}")
-    print(f"{'='*60}")
+    print(f"{'='*62}")
 
     predictions = []
-
-    for i, (_, match) in enumerate(upcoming.iterrows(), 1):
+    for i, match in enumerate(next5, 1):
         home_team_m = match['HomeTeam']
         away_team_m = match['AwayTeam']
-        match_date  = match['Date'].strftime('%d/%m/%Y') if pd.notna(match['Date']) else 'TBD'
         is_home     = (home_team_m == team)
         opponent    = away_team_m if is_home else home_team_m
-        venue       = '(H)' if is_home else '(A)'
+        venue_th    = 'เหย้า' if is_home else 'เยือน'
 
-        print(f"\n  {'─'*56}")
-        print(f"  นัดที่ {i} | {match_date}  |  {home_team_m} vs {away_team_m}")
-        print(f"  {'─'*56}")
+        print(f"\n  นัดที่ {i}  |  {home_team_m}  vs  {away_team_m}  ({venue_th})")
+        print(f"  {'─'*58}")
 
-        # ทำนายผล (win/draw/loss probability)
-        result_pred = predict_match(home_team_m, away_team_m, model_path)
-        # ทำนายสกอร์ (score probability)
+        result_pred = predict_match(home_team_m, away_team_m)
         score_pred  = predict_score(home_team_m, away_team_m)
 
         if result_pred and score_pred:
-            # แปลผลให้เป็นมุมมองของทีมที่เราสนใจ
             if is_home:
                 win_pct  = result_pred['Home Win']
                 draw_pct = result_pred['Draw']
                 loss_pct = result_pred['Away Win']
-                likely_outcome = result_pred['Prediction']
+                outcome  = result_pred['Prediction']
             else:
                 win_pct  = result_pred['Away Win']
                 draw_pct = result_pred['Draw']
                 loss_pct = result_pred['Home Win']
-                pred_map = {'Home Win': 'Away Win', 'Away Win': 'Home Win', 'Draw': 'Draw'}
-                likely_outcome = pred_map.get(result_pred['Prediction'], result_pred['Prediction'])
+                flip     = {'Home Win': 'Away Win', 'Away Win': 'Home Win', 'Draw': 'Draw'}
+                outcome  = flip.get(result_pred['Prediction'], result_pred['Prediction'])
 
-            team_wins = 'Win' in likely_outcome and (
-                (is_home and 'Home' in likely_outcome) or
-                (not is_home and 'Away' in likely_outcome)
-            )
-            team_result_label = (
-                f"✅ {team} ชนะ" if team_wins else
-                (f"🟡 เสมอ" if 'Draw' in likely_outcome else f"❌ {team} แพ้")
-            )
+            is_win  = (is_home and outcome == 'Home Win') or (not is_home and outcome == 'Away Win')
+            is_draw = outcome == 'Draw'
+            result_th = f"✅ {team} ชนะ" if is_win else ("🟡 เสมอ" if is_draw else f"❌ {team} แพ้")
 
-            print(f"\n  📌 ผลที่น่าจะเป็น:  {team_result_label}")
+            print(f"\n  📌 ผลที่น่าจะเป็น : {result_th}")
             print(f"  📊 ชนะ {win_pct}%  |  เสมอ {draw_pct}%  |  แพ้ {loss_pct}%")
-            print(f"  🎯 สกอร์คาด: {score_pred['most_likely_score']}")
-            print(f"  📈 xG: {home_team_m} {score_pred['home_xg']}  vs  {away_team_m} {score_pred['away_xg']}")
+            print(f"  🎯 สกอร์คาด      : {score_pred['most_likely_score']}")
 
             predictions.append({
-                'match_no':        i,
-                'date':            match_date,
-                'home':            home_team_m,
-                'away':            away_team_m,
-                'venue':           venue,
-                'opponent':        opponent,
-                'win_pct':         win_pct,
-                'draw_pct':        draw_pct,
-                'loss_pct':        loss_pct,
-                'predicted_result': likely_outcome,
+                'match_no': i, 'home': home_team_m, 'away': away_team_m,
+                'venue': venue_th, 'opponent': opponent,
+                'win_pct': win_pct, 'draw_pct': draw_pct, 'loss_pct': loss_pct,
+                'predicted_result': outcome,
                 'predicted_score': score_pred['most_likely_score'],
-                'top_scores':      score_pred['top5_scores'],
-                'home_xg':         score_pred['home_xg'],
-                'away_xg':         score_pred['away_xg'],
             })
 
-    print(f"\n{'#'*60}")
-    print(f"  📋  สรุปการทำนาย 5 แมตช์ข้างหน้า: {team}")
-    print(f"{'#'*60}")
-    print(f"  {'นัด':<5} {'วันที่':<12} {'คู่แข่ง':<22} {'H/A':<5} {'ชนะ%':<8} {'เสมอ%':<8} {'แพ้%':<8} {'สกอร์คาด'}")
-    print(f"  {'─'*80}")
+    # ── ตารางสรุป ──
+    print(f"\n{'#'*62}")
+    print(f"  📋  สรุป 5 แมตช์ข้างหน้า: {team}")
+    print(f"{'#'*62}")
+    print(f"  {'นัด':<5} {'คู่แข่ง':<24} {'สนาม':<7} {'ชนะ%':<8} {'เสมอ%':<8} {'แพ้%':<8} {'สกอร์คาด'}")
+    print(f"  {'─'*68}")
     for p in predictions:
-        print(f"  {p['match_no']:<5} {p['date']:<12} {p['opponent']:<22} {p['venue']:<5} "
+        print(f"  {p['match_no']:<5} {p['opponent']:<24} {p['venue']:<7} "
               f"{p['win_pct']:<8} {p['draw_pct']:<8} {p['loss_pct']:<8} {p['predicted_score']}")
-    print(f"{'#'*60}\n")
+    print(f"{'#'*62}\n")
 
-    return {
-        'next_5_predictions': predictions,
-        'last_5_results':     last5_df,
-    }
+    return {'next_5': predictions, 'last_5': last5_df}
 
 
 # ==============================
-# 18) EXAMPLE USAGE
+# 18) ดึงตารางแข่งจริงจาก football-data.org API
 # ==============================
-# เรียกใช้ฟังก์ชันใหม่ได้ดังนี้:
-#
-# ดูผลย้อนหลัง 5 แมตช์:
-#   get_last_5_results("Arsenal")
-#
-# ทำนายสกอร์แมตช์เดียว:
-#   predict_score("Man City", "Liverpool")
-#
-# ทำนาย 5 แมตช์ข้างหน้า + ผลย้อนหลัง (ฟังก์ชันหลัก):
-#   predict_next_5_matches("Arsenal")
-#   predict_next_5_matches("Man City")
-#   predict_next_5_matches("Liverpool")
+# ✅ วิธีขอ API Key ฟรี:
+#    1. ไปที่ https://www.football-data.org/client/register
+#    2. สมัครฟรี (ใช้อีเมลสมัคร)
+#    3. เช็คอีเมล จะได้ API key มา
+#    4. วาง key ตรง API_KEY ด้านล่าง
+
+import requests
+
+API_KEY = "745c5b802b204590bfa05c093f00bd43"   # ← วาง key ที่ได้จาก football-data.org ตรงนี้
+
+# แผนที่ชื่อทีม API → ชื่อในข้อมูลเรา
+TEAM_NAME_MAP = {
+    "Arsenal FC":                  "Arsenal",
+    "Aston Villa FC":              "Aston Villa",
+    "AFC Bournemouth":             "Bournemouth",
+    "Brentford FC":                "Brentford",
+    "Brighton & Hove Albion FC":   "Brighton",
+    "Burnley FC":                  "Burnley",
+    "Chelsea FC":                  "Chelsea",
+    "Crystal Palace FC":           "Crystal Palace",
+    "Everton FC":                  "Everton",
+    "Fulham FC":                   "Fulham",
+    "Leeds United FC":             "Leeds",
+    "Liverpool FC":                "Liverpool",
+    "Manchester City FC":          "Man City",
+    "Manchester United FC":        "Man United",
+    "Newcastle United FC":         "Newcastle",
+    "Nottingham Forest FC":        "Nott'm Forest",
+    "Sunderland AFC":              "Sunderland",
+    "Tottenham Hotspur FC":        "Tottenham",
+    "West Ham United FC":          "West Ham",
+    "Wolverhampton Wanderers FC":  "Wolves",
+}
+
+def normalize(name):
+    return TEAM_NAME_MAP.get(name, name)
+
+
+def fetch_fixtures_from_api(target_team, num_matches=5):
+    """
+    ดึงตารางแข่ง Premier League ที่ยังไม่แข่งจาก football-data.org
+    - PL competition id = PL
+    - ดึงเฉพาะ SCHEDULED (ยังไม่แข่ง)
+    """
+    if API_KEY == "YOUR_API_KEY_HERE":
+        print("  ❌ ยังไม่ได้ใส่ API Key!")
+        print("  👉 สมัครฟรีที่ https://www.football-data.org/client/register")
+        print("  👉 แล้วแก้ API_KEY = 'your_key_here' ในโค้ด")
+        return None
+
+    url = "https://api.football-data.org/v4/competitions/PL/matches"
+    headers = {"X-Auth-Token": API_KEY}
+    params  = {"status": "SCHEDULED"}          # เฉพาะนัดที่ยังไม่แข่ง
+
+    try:
+        print(f"  🌐 ดึงข้อมูลจาก football-data.org API...")
+        r = requests.get(url, headers=headers, params=params, timeout=10)
+
+        if r.status_code == 401:
+            print("  ❌ API Key ไม่ถูกต้อง หรือยังไม่ activate")
+            return None
+        if r.status_code == 429:
+            print("  ❌ เกิน rate limit (ฟรี = 10 req/min) — รอสักครู่แล้วลองใหม่")
+            return None
+        r.raise_for_status()
+
+        data     = r.json()
+        matches  = data.get("matches", [])
+        print(f"  ✅ ดึงได้ {len(matches)} นัดที่ยังไม่แข่ง")
+
+        # แปลงชื่อและกรองเฉพาะทีมที่ต้องการ
+        all_fixtures = []
+        for m in matches:
+            home = normalize(m["homeTeam"]["name"])
+            away = normalize(m["awayTeam"]["name"])
+            date = m["utcDate"][:10]   # YYYY-MM-DD
+            all_fixtures.append({
+                "HomeTeam": home,
+                "AwayTeam": away,
+                "Date":     date,
+            })
+
+        # กรองเฉพาะทีมที่ต้องการ เรียงตามวันที่
+        team_fixtures = [
+            f for f in all_fixtures
+            if f["HomeTeam"] == target_team or f["AwayTeam"] == target_team
+        ][:num_matches]
+
+        if not team_fixtures:
+            print(f"  ❌ ไม่พบนัดของ '{target_team}'")
+            print(f"  ชื่อทีมที่ API รู้จัก: {sorted(set([f['HomeTeam'] for f in all_fixtures]))}")
+            return None
+
+        print(f"\n  📅 ตารางแข่ง {num_matches} นัดข้างหน้าของ {target_team}:")
+        print(f"  {'นัด':<5} {'วันที่':<14} {'เหย้า':<22} {'เยือน':<22} {'สนาม'}")
+        print(f"  {'─'*65}")
+        for i, f in enumerate(team_fixtures, 1):
+            venue = "เหย้า" if f["HomeTeam"] == target_team else "เยือน"
+            print(f"  {i:<5} {f['Date']:<14} {f['HomeTeam']:<22} {f['AwayTeam']:<22} {venue}")
+
+        return team_fixtures
+
+    except requests.exceptions.ConnectionError:
+        print("  ❌ เชื่อมต่ออินเทอร์เน็ตไม่ได้")
+        return None
+    except Exception as e:
+        print(f"  ❌ Error: {e}")
+        return None
+
+
+def fetch_all_pl_fixtures():
+    """
+    ดึงตารางแข่ง PL ทั้งหมดที่เหลือ แล้ว save เป็น CSV
+    เพื่อ update data_set/season 2025.csv ให้ครบ
+    """
+    if API_KEY == "YOUR_API_KEY_HERE":
+        print("❌ ยังไม่ได้ใส่ API Key!")
+        return
+
+    url     = "https://api.football-data.org/v4/competitions/PL/matches"
+    headers = {"X-Auth-Token": API_KEY}
+    params  = {"status": "SCHEDULED"}
+
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=10)
+        r.raise_for_status()
+        matches = r.json().get("matches", [])
+
+        rows = []
+        for m in matches:
+            rows.append({
+                "Date":     pd.to_datetime(m["utcDate"]).strftime("%d/%m/%Y"),
+                "HomeTeam": normalize(m["homeTeam"]["name"]),
+                "AwayTeam": normalize(m["awayTeam"]["name"]),
+                "FTHG":     "",    # ว่าง = ยังไม่แข่ง
+                "FTAG":     "",
+            })
+
+        fixtures_df = pd.DataFrame(rows)
+        season_file = pd.read_csv("data_set/season 2025.csv")
+
+        # Merge เข้ากับ season file เดิม
+        merged = pd.concat([season_file, fixtures_df], ignore_index=True)
+        merged = merged.drop_duplicates(subset=["HomeTeam", "AwayTeam"])
+        merged.to_csv("data_set/season 2025.csv", index=False)
+        print(f"✅ อัปเดต season 2025.csv แล้ว — {len(fixtures_df)} นัดอนาคต")
+
+    except Exception as e:
+        print(f"❌ {e}")
+
+
+# ==============================
+# 18) predict_with_api
+# ==============================
+
+def predict_with_api(team, num_matches=5):
+    SEP = '=' * 62
+    print()
+    print(SEP)
+    print('  🔮  ทำนาย ' + str(num_matches) + ' แมตช์ข้างหน้า: ' + team)
+    print(SEP)
+    fixtures = fetch_fixtures_from_api(team, num_matches)
+    if fixtures:
+        predict_next_5_matches(team, fixtures=fixtures)
+    else:
+        print('  ⚠️  fallback: ใช้การเดาอัตโนมัติ')
+        predict_next_5_matches(team)
+
+
+# ==============================
+# 19) ตารางแข่ง PL N นัดถัดไป + ทำนายทุกแมตช์
+# ==============================
+
+def show_next_pl_fixtures(num_matches=5):
+    """แสดงตารางแข่ง PL N นัดถัดไปพร้อมทำนายผลทุกแมตช์"""
+
+    if API_KEY == "YOUR_API_KEY_HERE":
+        print("❌ ยังไม่ได้ใส่ API Key!")
+        return
+
+    SEP  = "=" * 65
+    LINE = "-" * 78
+
+    url     = "https://api.football-data.org/v4/competitions/PL/matches"
+    headers = {"X-Auth-Token": API_KEY}
+    params  = {"status": "SCHEDULED"}
+
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=10)
+        r.raise_for_status()
+        matches = r.json().get("matches", [])
+        matches = sorted(matches, key=lambda x: x["utcDate"])[:num_matches]
+
+        if not matches:
+            print("  ⚠️  ไม่พบแมตช์ที่ยังไม่แข่ง")
+            return
+
+        from datetime import datetime, timedelta
+
+        # ── แสดงตาราง ──
+        print()
+        print(SEP)
+        print(f"  📅  ตารางแข่ง Premier League {num_matches} นัดถัดไป")
+        print(SEP)
+        print(f"  {'นัด':<5} {'วันที่':<14} {'เวลา(TH)':<11} {'เหย้า':<22} {'เยือน'}")
+        print("  " + "-" * 60)
+
+        upcoming = []
+        for i, m in enumerate(matches, 1):
+            home = normalize(m["homeTeam"]["name"])
+            away = normalize(m["awayTeam"]["name"])
+            utc_dt   = datetime.fromisoformat(m["utcDate"].replace("Z", "+00:00"))
+            th_dt    = utc_dt + timedelta(hours=7)
+            date_str = th_dt.strftime("%d/%m/%Y")
+            time_str = th_dt.strftime("%H:%M")
+            print(f"  {i:<5} {date_str:<14} {time_str:<11} {home:<22} {away}")
+            upcoming.append({"HomeTeam": home, "AwayTeam": away,
+                             "Date": date_str, "Time": time_str})
+
+        # ── ทำนายทุกแมตช์ ──
+        print()
+        print(SEP)
+        print(f"  🤖  ผลทำนาย {num_matches} นัดถัดไป")
+        print(SEP)
+        print(f"  {'นัด':<5} {'เหย้า':<20} {'vs':^4} {'เยือน':<20} "
+              f"{'ชนะ%':>7} {'เสมอ%':>7} {'แพ้%':>7}  {'สกอร์'}")
+        print("  " + "-" * 75)
+
+        teams_ok = set(match_df["HomeTeam"].tolist() + match_df["AwayTeam"].tolist())
+
+        for i, f in enumerate(upcoming, 1):
+            home, away = f["HomeTeam"], f["AwayTeam"]
+            if home not in teams_ok or away not in teams_ok:
+                print(f"  {i:<5} {home:<20} {'vs':^4} {away:<20}  ⚠️ ไม่มีข้อมูล")
+                continue
+
+            r_pred = predict_match(home, away)
+            s_pred = predict_score(home, away)
+
+            if r_pred and s_pred:
+                hw    = r_pred["Home Win"]
+                dr    = r_pred["Draw"]
+                aw    = r_pred["Away Win"]
+                pred  = r_pred["Prediction"]
+                icon  = "🏠" if pred == "Home Win" else ("🤝" if pred == "Draw" else "✈️")
+                score = s_pred["most_likely_score"]
+                print(f"  {i:<5} {home:<20} {'vs':^4} {away:<20} "
+                      f"{hw:>7} {dr:>7} {aw:>7}  {icon} {score}")
+
+        print("  " + "-" * 75)
+        print("  🏠 เหย้าชนะ  🤝 เสมอ  ✈️ เยือนชนะ")
+        print(SEP)
+        print()
+        return upcoming
+
+    except requests.exceptions.ConnectionError:
+        print("  ❌ เชื่อมต่ออินเทอร์เน็ตไม่ได้")
+    except Exception as e:
+        print(f"  ❌ Error: {e}")
+
+
+# ==============================
+# 🚀 เรียกใช้งาน
+# ==============================
+
+# ── ทำนายทีมที่ต้องการ ──
+predict_with_api("Arsenal")
+# predict_with_api("Liverpool")
+# predict_with_api("Man City")
+# predict_with_api("Chelsea")
+# predict_with_api("Aston Villa")
+
+# ── แสดงตารางแข่ง PL ถัดไปพร้อมทำนาย ──
+show_next_pl_fixtures(10)    # 5 นัดถัดไป
+# show_next_pl_fixtures(10)  # 10 นัด
+# show_next_pl_fixtures(20)  # 20 นัด
