@@ -435,53 +435,16 @@ def predict_match(home_team, away_team, model_path="model/football_model.pkl"):
 
 
 # ==============================
-# 13) SEASON SIMULATION 2025-26 (FIXED v2)
+# 13) SEASON SIMULATION 2025-26
 # ==============================
-# แก้ปัญหา: football-data.co.uk ไม่มีนัดอนาคตในไฟล์
-# วิธีแก้: สร้าง remaining fixtures อัตโนมัติจากคู่ที่ยังไม่ได้แข่ง
-#          แล้วใช้ฟอร์มล่าสุดของแต่ละทีมทำนายผล
 
 import datetime
 TODAY = pd.Timestamp(datetime.date.today())
 
-season_file = pd.read_csv("data_set/season 2025.csv")
-season_file['Date'] = pd.to_datetime(season_file['Date'], dayfirst=True)
+# ตัวแปร global สำหรับ final_table (ใช้ใน summary)
+final_table      = None
+remaining_fixtures = []
 
-# แมตช์ที่แข่งแล้ว = มีผลจริง (FTHG ไม่ใช่ NaN)
-played = season_file.dropna(subset=['FTHG', 'FTAG']).copy()
-played = played[played['Date'] <= TODAY]
-
-# สร้าง remaining fixtures อัตโนมัติ
-season_teams = list(set(season_file['HomeTeam'].tolist() + season_file['AwayTeam'].tolist()))
-played_pairs = set(zip(played['HomeTeam'], played['AwayTeam']))
-remaining_fixtures = [
-    {'HomeTeam': h, 'AwayTeam': a}
-    for h in season_teams for a in season_teams
-    if h != a and (h, a) not in played_pairs
-]
-unplayed = pd.DataFrame(remaining_fixtures)
-
-print(f"\n📅 วันนี้: {TODAY.date()}")
-print(f"✅ แมตช์แข่งแล้ว:    {len(played)} นัด")
-print(f"⏳ แมตช์ยังไม่แข่ง: {len(unplayed)} นัด (สร้างจาก remaining fixtures อัตโนมัติ)")
-print(f"   รวม: {len(played) + len(unplayed)} นัด (ฤดูกาล 38 นัด × 20 ทีม = 380 นัด)")
-
-# คะแนนจริงจากแมตช์ที่แข่งแล้ว
-real_table = {}
-for _, row in played.iterrows():
-    home, away = row['HomeTeam'], row['AwayTeam']
-    hg, ag = int(row['FTHG']), int(row['FTAG'])
-    for t in [home, away]:
-        if t not in real_table: real_table[t] = 0
-    if hg > ag:   real_table[home] += 3
-    elif hg < ag: real_table[away] += 3
-    else:
-        real_table[home] += 1
-        real_table[away] += 1
-
-real_table_df = pd.DataFrame.from_dict(real_table, orient='index', columns=['RealPoints'])
-
-# ทำนาย remaining fixtures โดยสร้าง features จากฟอร์มล่าสุดของแต่ละทีม
 def get_latest_features(team, is_home):
     if is_home:
         rows = match_df[match_df['HomeTeam'] == team].sort_values('Date_x')
@@ -501,78 +464,151 @@ def get_latest_features(team, is_home):
     return {'GF5': 1.5, 'GA5': 1.5, 'Pts5': 1.5, 'Streak3': 1.5,
             'Win5': 0.5, 'CS5': 0.2, 'Scored5': 0.6}
 
-pred_table = {}
 
-if len(unplayed) > 0:
-    future_rows = []
-    for _, match in unplayed.iterrows():
-        home, away = match['HomeTeam'], match['AwayTeam']
-        h = get_latest_features(home, is_home=True)
-        a = get_latest_features(away, is_home=False)
-        h_elo = final_elo.get(home, 1500)
-        a_elo = final_elo.get(away, 1500)
-        h2h_rows = match_df[(match_df['HomeTeam'] == home) & (match_df['AwayTeam'] == away)]
-        h2h_rate = h2h_rows['H2H_HomeWinRate'].iloc[-1] if len(h2h_rows) > 0 else 0.33
-        future_rows.append({
-            'HomeTeam': home, 'AwayTeam': away,
-            'Diff_Pts':     h['Pts5']     - a['Pts5'],
-            'Diff_GF':      h['GF5']      - a['GF5'],
-            'Diff_GA':      h['GA5']      - a['GA5'],
-            'Diff_Win':     h['Win5']     - a['Win5'],
-            'Diff_CS':      h['CS5']      - a['CS5'],
-            'Diff_Streak':  h['Streak3']  - a['Streak3'],
-            'Diff_Elo':     h_elo - a_elo,
-            'Diff_Scored':  h['Scored5']  - a['Scored5'],
-            'H2H_HomeWinRate': h2h_rate,
-            'H_GF5': h['GF5'],     'H_GA5': h['GA5'],
-            'H_Pts5': h['Pts5'],   'H_Streak3': h['Streak3'],
-            'H_CS5': h['CS5'],     'H_Scored5': h['Scored5'],
-            'A_GF5': a['GF5'],     'A_GA5': a['GA5'],
-            'A_Pts5': a['Pts5'],   'A_Streak3': a['Streak3'],
-            'A_CS5': a['CS5'],     'A_Scored5': a['Scored5'],
-            'H_Elo_norm': h_elo / 1500,
-            'A_Elo_norm': a_elo / 1500,
-            'Elo_ratio':  h_elo / (a_elo + 1),
-        })
+def run_season_simulation():
+    """รันการจำลองฤดูกาล — เรียกหลัง update_season_csv_from_api() เสมอ"""
+    global final_table, remaining_fixtures
 
-    future_df = pd.DataFrame(future_rows)
-    X_future = scaler.transform(future_df[FEATURES])
-    future_df['Pred'] = ensemble.predict(X_future)
-    print(f"🤖 ทำนาย {len(future_df)} แมตช์ที่เหลือ")
+    season_file = pd.read_csv("data_set/season 2025.csv")
+    season_file['Date'] = pd.to_datetime(season_file['Date'], dayfirst=True, errors='coerce')
 
-    for _, row in future_df.iterrows():
+    # แมตช์ที่แข่งแล้ว = มีผลจริง
+    played = season_file.dropna(subset=['FTHG', 'FTAG']).copy()
+    played = played[played['Date'] <= TODAY]
+
+    # สร้าง remaining fixtures อัตโนมัติ
+    season_teams = list(set(season_file['HomeTeam'].tolist() + season_file['AwayTeam'].tolist()))
+    played_pairs = set(zip(played['HomeTeam'], played['AwayTeam']))
+    remaining_fixtures = [
+        {'HomeTeam': h, 'AwayTeam': a}
+        for h in season_teams for a in season_teams
+        if h != a and (h, a) not in played_pairs
+    ]
+    unplayed = pd.DataFrame(remaining_fixtures)
+
+    print(f"\n📅 วันนี้: {TODAY.date()}")
+    print(f"✅ แมตช์แข่งแล้ว:    {len(played)} นัด")
+    print(f"⏳ แมตช์ยังไม่แข่ง: {len(unplayed)} นัด (สร้างจาก remaining fixtures อัตโนมัติ)")
+    print(f"   รวม: {len(played) + len(unplayed)} นัด (ฤดูกาล 38 นัด × 20 ทีม = 380 นัด)")
+
+    # คะแนนจริงจากแมตช์ที่แข่งแล้ว
+    real_table = {}
+    for _, row in played.iterrows():
         home, away = row['HomeTeam'], row['AwayTeam']
-        pred = row['Pred']
+        hg, ag = int(row['FTHG']), int(row['FTAG'])
         for t in [home, away]:
-            if t not in pred_table: pred_table[t] = 0
-        if pred == 2:   pred_table[home] += 3
-        elif pred == 1: pred_table[home] += 1; pred_table[away] += 1
-        else:           pred_table[away] += 3
-else:
-    print("ℹ️  ฤดูกาลจบแล้ว ไม่มีแมตช์ที่เหลือ")
-pred_table_df = pd.DataFrame.from_dict(
-    pred_table, orient='index', columns=['PredictedPoints']
-)
+            if t not in real_table: real_table[t] = 0
+        if hg > ag:   real_table[home] += 3
+        elif hg < ag: real_table[away] += 3
+        else:
+            real_table[home] += 1
+            real_table[away] += 1
 
-# --- รวมตาราง ---
-final_table = real_table_df.join(pred_table_df, how='left').fillna(0)
-final_table['PredictedPoints'] = final_table['PredictedPoints'].astype(int)
-final_table['FinalPoints']     = final_table['RealPoints'] + final_table['PredictedPoints']
-final_table = final_table.sort_values('FinalPoints', ascending=False)
-final_table.index.name = 'Team'
+    real_table_df = pd.DataFrame.from_dict(real_table, orient='index', columns=['RealPoints'])
 
-print(f"\n{'='*55}")
-print(f"  🏆  FULL SEASON 2025-26 PREDICTED TABLE")
-print(f"      (Real ถึง {TODAY.date()} + AI ทำนายส่วนที่เหลือ)")
-print(f"{'='*55}")
-print(f"  {'#':<4} {'Team':<20} {'Real':>6} {'Pred':>6} {'Total':>7}")
-print(f"  {'─'*50}")
-for rank, (team, row) in enumerate(final_table.iterrows(), 1):
-    marker = "🔴" if rank <= 3 else ("🟡" if rank >= 18 else "  ")
-    print(f"{marker} {rank:<4} {team:<20} {int(row['RealPoints']):>6} "
-          f"{int(row['PredictedPoints']):>6} {int(row['FinalPoints']):>7}")
-print(f"  {'─'*50}")
-print(f"  🔴 = Top 3 (UEFA CL)  |  🟡 = Relegation Zone")
+    pred_table = {}
+
+    if len(unplayed) > 0:
+        future_rows = []
+        for _, match in unplayed.iterrows():
+            home, away = match['HomeTeam'], match['AwayTeam']
+            h = get_latest_features(home, is_home=True)
+            a = get_latest_features(away, is_home=False)
+            h_elo = final_elo.get(home, 1500)
+            a_elo = final_elo.get(away, 1500)
+            h2h_rows = match_df[(match_df['HomeTeam'] == home) & (match_df['AwayTeam'] == away)]
+            h2h_rate = h2h_rows['H2H_HomeWinRate'].iloc[-1] if len(h2h_rows) > 0 else 0.33
+            future_rows.append({
+                'HomeTeam': home, 'AwayTeam': away,
+                'Diff_Pts':     h['Pts5']     - a['Pts5'],
+                'Diff_GF':      h['GF5']      - a['GF5'],
+                'Diff_GA':      h['GA5']      - a['GA5'],
+                'Diff_Win':     h['Win5']     - a['Win5'],
+                'Diff_CS':      h['CS5']      - a['CS5'],
+                'Diff_Streak':  h['Streak3']  - a['Streak3'],
+                'Diff_Elo':     h_elo - a_elo,
+                'Diff_Scored':  h['Scored5']  - a['Scored5'],
+                'H2H_HomeWinRate': h2h_rate,
+                'H_GF5': h['GF5'],     'H_GA5': h['GA5'],
+                'H_Pts5': h['Pts5'],   'H_Streak3': h['Streak3'],
+                'H_CS5': h['CS5'],     'H_Scored5': h['Scored5'],
+                'A_GF5': a['GF5'],     'A_GA5': a['GA5'],
+                'A_Pts5': a['Pts5'],   'A_Streak3': a['Streak3'],
+                'A_CS5': a['CS5'],     'A_Scored5': a['Scored5'],
+                'H_Elo_norm': h_elo / 1500,
+                'A_Elo_norm': a_elo / 1500,
+                'Elo_ratio':  h_elo / (a_elo + 1),
+            })
+
+        future_df = pd.DataFrame(future_rows)
+        X_future = scaler.transform(future_df[FEATURES])
+        future_df['Pred'] = ensemble.predict(X_future)
+        print(f"🤖 ทำนาย {len(future_df)} แมตช์ที่เหลือ")
+
+        for _, row in future_df.iterrows():
+            home, away = row['HomeTeam'], row['AwayTeam']
+            pred = row['Pred']
+            for t in [home, away]:
+                if t not in pred_table: pred_table[t] = 0
+            if pred == 2:   pred_table[home] += 3
+            elif pred == 1: pred_table[home] += 1; pred_table[away] += 1
+            else:           pred_table[away] += 3
+    else:
+        print("ℹ️  ฤดูกาลจบแล้ว ไม่มีแมตช์ที่เหลือ")
+
+    pred_table_df = pd.DataFrame.from_dict(pred_table, orient='index', columns=['PredictedPoints'])
+
+    # รวมตาราง
+    final_table = real_table_df.join(pred_table_df, how='left').fillna(0)
+    final_table['PredictedPoints'] = final_table['PredictedPoints'].astype(int)
+    final_table['FinalPoints']     = final_table['RealPoints'] + final_table['PredictedPoints']
+    final_table.index.name = 'Team'
+
+    # ── ตารางคะแนนจริงปัจจุบัน (เรียงตาม RealPoints) ──
+    real_sorted = final_table.sort_values('RealPoints', ascending=False)
+    played_count = len(played) // len(season_teams) if len(season_teams) > 0 else 0
+
+    print(f"\n{'='*58}")
+    print(f"  📊  ตารางคะแนนจริง ณ ปัจจุบัน  (ถึง {TODAY.date()})")
+    print(f"{'='*58}")
+    print(f"  {'#':<4} {'Team':<22} {'แข่ง':>5} {'แต้ม':>6}  {'สถานะ'}")
+    print(f"  {'─'*55}")
+    for rank, (team, row) in enumerate(real_sorted.iterrows(), 1):
+        if rank <= 4:
+            status = "🔴 CL Zone"
+        elif rank <= 6:
+            status = "🟠 Euro Zone"
+        elif rank >= 18:
+            status = "🟡 Relegation"
+        else:
+            status = ""
+        print(f"  {rank:<4} {team:<22} {played_count:>5} {int(row['RealPoints']):>6}  {status}")
+    print(f"  {'─'*55}")
+    print(f"  🔴 CL  🟠 Europa  🟡 ตกชั้น")
+
+    # ── ตารางคาดการณ์สิ้นฤดูกาล (เรียงตาม FinalPoints) ──
+    final_sorted = final_table.sort_values('FinalPoints', ascending=False)
+
+    print(f"\n{'='*62}")
+    print(f"  🔮  ตารางคาดการณ์สิ้นฤดูกาล  (Real + AI ทำนาย {len(unplayed)} นัดที่เหลือ)")
+    print(f"{'='*62}")
+    print(f"  {'#':<4} {'Team':<22} {'แต้มจริง':>9} {'AI ทำนาย':>10} {'รวมคาด':>8}  {'สถานะ'}")
+    print(f"  {'─'*60}")
+    for rank, (team, row) in enumerate(final_sorted.iterrows(), 1):
+        if rank <= 4:
+            status = "🔴 CL Zone"
+        elif rank <= 6:
+            status = "🟠 Euro Zone"
+        elif rank >= 18:
+            status = "🟡 Relegation"
+        else:
+            status = ""
+        arrow = "▲" if rank < list(real_sorted.index).index(team) + 1 else \
+                ("▼" if rank > list(real_sorted.index).index(team) + 1 else "─")
+        print(f"  {rank:<4} {team:<22} {int(row['RealPoints']):>9} {int(row['PredictedPoints']):>10} "
+              f"{int(row['FinalPoints']):>8}  {arrow} {status}")
+    print(f"  {'─'*60}")
+    print(f"  🔴 CL  🟠 Europa  🟡 ตกชั้น  │  ▲ขึ้น ▼ลง ─คงที่ (เทียบตารางจริง)")
 
 # ==============================
 # 14) EXAMPLE: PREDICT A SINGLE MATCH
@@ -1155,12 +1191,13 @@ def print_full_summary():
     # ── 4. ตาราง Season 2025-26 สรุป ─────────────────────────────
     print()
     print(SEP)
-    print("  📋  4. ตารางคะแนน Season 2025-26 (คาดการณ์สิ้นฤดูกาล)")
+    print("  📋  4. ตารางคาดการณ์สิ้นฤดูกาล Season 2025-26")
     print(SEP)
     print(f"  {'#':<5} {'ทีม':<22} {'คะแนนจริง':>10} {'คะแนนทำนาย':>12} {'รวม':>7}  {'สถานะ'}")
     print(f"  {LINE}")
-    for rank, (team, row) in enumerate(final_table.iterrows(), 1):
-        if rank <= 3:
+    final_sorted = final_table.sort_values('FinalPoints', ascending=False)
+    for rank, (team, row) in enumerate(final_sorted.iterrows(), 1):
+        if rank <= 4:
             status = "🔴 Champions League"
         elif rank <= 6:
             status = "🟠 Europa / Conf."
@@ -1170,7 +1207,7 @@ def print_full_summary():
             status = ""
         print(f"  {rank:<5} {team:<22} {int(row['RealPoints']):>10} {int(row['PredictedPoints']):>12} {int(row['FinalPoints']):>7}  {status}")
     print(f"  {LINE}")
-    print(f"  🔴 Top 3 = UEFA CL  |  🟠 Top 4-6 = Europa/Conf.  |  🟡 18-20 = ตกชั้น")
+    print(f"  🔴 Top 4 = UEFA CL  |  🟠 Top 5-6 = Europa/Conf.  |  🟡 18-20 = ตกชั้น")
 
     # ── 5. สถิติทั่วไปของดาต้า ────────────────────────────────────
     print()
@@ -1217,5 +1254,469 @@ def print_full_summary():
     print()
 
 
-# ── STEP 3: แสดงสรุปทั้งหมด ──
+# ==============================
+# PHASE 2 — COMPETITION GRADE
+# ==============================
+
+# ──────────────────────────────────────────────────────────────
+# P2-1) MONTE CARLO SEASON SIMULATION (1,000 รอบ)
+#       + Top4 / Relegation probability
+# ──────────────────────────────────────────────────────────────
+
+def run_monte_carlo(n_simulations=1000, verbose=True):
+    """
+    จำลองฤดูกาลที่เหลือ n_simulations รอบ โดยสุ่มผลตาม
+    probability ของโมเดล แล้วรวมกับคะแนนจริงที่ทำแล้ว
+
+    Returns:
+        dict  {team: {'top4': %, 'top6': %, 'relegation': %, 'mean_pts': float, 'std_pts': float}}
+    """
+    if final_table is None:
+        print("❌ กรุณาเรียก run_season_simulation() ก่อน")
+        return None
+
+    SEP  = "=" * 65
+    LINE = "─" * 65
+
+    if verbose:
+        print()
+        print(SEP)
+        print(f"  🎲  MONTE CARLO SEASON SIMULATION  ({n_simulations:,} รอบ)")
+        print(SEP)
+        print(f"  กำลังจำลอง {len(remaining_fixtures)} แมตช์ที่เหลือ × {n_simulations:,} รอบ ...")
+
+    # สร้าง feature matrix ของ remaining fixtures ครั้งเดียว
+    if not remaining_fixtures:
+        if verbose:
+            print("  ℹ️  ฤดูกาลจบแล้ว ไม่มีแมตช์ที่เหลือ")
+        return None
+
+    future_rows = []
+    for match in remaining_fixtures:
+        home, away = match['HomeTeam'], match['AwayTeam']
+        h = get_latest_features(home, is_home=True)
+        a = get_latest_features(away, is_home=False)
+        h_elo = final_elo.get(home, 1500)
+        a_elo = final_elo.get(away, 1500)
+        h2h_rows = match_df[(match_df['HomeTeam'] == home) & (match_df['AwayTeam'] == away)]
+        h2h_rate = h2h_rows['H2H_HomeWinRate'].iloc[-1] if len(h2h_rows) > 0 else 0.33
+        future_rows.append({
+            'HomeTeam': home, 'AwayTeam': away,
+            'Diff_Pts': h['Pts5'] - a['Pts5'],
+            'Diff_GF':  h['GF5']  - a['GF5'],
+            'Diff_GA':  h['GA5']  - a['GA5'],
+            'Diff_Win': h['Win5'] - a['Win5'],
+            'Diff_CS':  h['CS5']  - a['CS5'],
+            'Diff_Streak': h['Streak3'] - a['Streak3'],
+            'Diff_Elo':    h_elo - a_elo,
+            'Diff_Scored': h['Scored5'] - a['Scored5'],
+            'H2H_HomeWinRate': h2h_rate,
+            'H_GF5': h['GF5'],     'H_GA5': h['GA5'],
+            'H_Pts5': h['Pts5'],   'H_Streak3': h['Streak3'],
+            'H_CS5': h['CS5'],     'H_Scored5': h['Scored5'],
+            'A_GF5': a['GF5'],     'A_GA5': a['GA5'],
+            'A_Pts5': a['Pts5'],   'A_Streak3': a['Streak3'],
+            'A_CS5': a['CS5'],     'A_Scored5': a['Scored5'],
+            'H_Elo_norm': h_elo / 1500,
+            'A_Elo_norm': a_elo / 1500,
+            'Elo_ratio':  h_elo / (a_elo + 1),
+        })
+
+    future_df = pd.DataFrame(future_rows)
+    X_future_sc = scaler.transform(future_df[FEATURES])
+
+    # ดึง probability ทุกแมตช์ครั้งเดียว shape (n_matches, 3)
+    # class order: 0=Away Win, 1=Draw, 2=Home Win
+    proba_matrix = ensemble.predict_proba(X_future_sc)   # (n_matches, 3)
+
+    all_teams = list(final_table.index)
+    real_pts  = {t: int(final_table.loc[t, 'RealPoints']) for t in all_teams}
+
+    # ตัวนับ
+    counts = {t: {'top4': 0, 'top6': 0, 'relegation': 0, 'pts_sum': 0.0, 'pts_sq': 0.0}
+              for t in all_teams}
+
+    rng = np.random.default_rng(42)
+
+    for _ in range(n_simulations):
+        sim_pts = dict(real_pts)  # เริ่มต้นจากคะแนนจริง
+
+        for idx, match in enumerate(remaining_fixtures):
+            home, away = match['HomeTeam'], match['AwayTeam']
+            p_away, p_draw, p_home = proba_matrix[idx]
+            # normalize เพื่อแก้ floating point precision
+            probs = np.array([p_away, p_draw, p_home], dtype=np.float64)
+            probs /= probs.sum()
+
+            # สุ่มผล
+            outcome = rng.choice([0, 1, 2], p=probs)
+            if outcome == 2:   sim_pts[home] += 3
+            elif outcome == 1: sim_pts[home] += 1; sim_pts[away] += 1
+            else:              sim_pts[away] += 3
+
+        # เรียงอันดับในรอบนี้
+        ranked = sorted(sim_pts.items(), key=lambda x: x[1], reverse=True)
+        for rank, (team, pts) in enumerate(ranked, 1):
+            if rank <= 4:  counts[team]['top4'] += 1
+            if rank <= 6:  counts[team]['top6'] += 1
+            if rank >= 18: counts[team]['relegation'] += 1
+            counts[team]['pts_sum'] += pts
+            counts[team]['pts_sq']  += pts ** 2
+
+    # คำนวณสถิติ
+    results = {}
+    for t in all_teams:
+        c = counts[t]
+        mean = c['pts_sum'] / n_simulations
+        std  = ((c['pts_sq'] / n_simulations) - mean ** 2) ** 0.5
+        results[t] = {
+            'top4':       round(c['top4']       / n_simulations * 100, 1),
+            'top6':       round(c['top6']       / n_simulations * 100, 1),
+            'relegation': round(c['relegation'] / n_simulations * 100, 1),
+            'mean_pts':   round(mean, 1),
+            'std_pts':    round(std,  1),
+        }
+
+    if not verbose:
+        return results
+
+    # ── แสดงผล Top 4 / Relegation ──────────────────────────────
+    sorted_results = sorted(results.items(), key=lambda x: x[1]['mean_pts'], reverse=True)
+
+    print(f"\n  {'Team':<22} {'Mean Pts':>9} {'±Std':>6} {'Top4%':>7} {'Top6%':>7} {'Rel%':>7}  {'Bar (Top4)'}")
+    print(f"  {LINE}")
+
+    for team, r in sorted_results:
+        bar_top4 = '█' * int(r['top4'] / 5)   # 1 block = 5%
+        bar_rel  = '▓' * int(r['relegation'] / 5)
+        bar      = bar_top4 if r['top4'] >= r['relegation'] else bar_rel
+        color_t4  = "🔴" if r['top4']       >= 60 else ("🟡" if r['top4']       >= 20 else "  ")
+        color_rel = "🟡" if r['relegation'] >= 60 else ("⚠️ " if r['relegation'] >= 20 else "  ")
+        print(f"  {team:<22} {r['mean_pts']:>9} {r['std_pts']:>6} "
+              f"{color_t4}{r['top4']:>5}%  {r['top6']:>6}%  "
+              f"{color_rel}{r['relegation']:>4}%  {bar}")
+
+    print(f"  {LINE}")
+
+    # ── Top 4 Champion Odds ──────────────────────────────────────
+    print(f"\n  🏆  TITLE RACE (ชนะเลิศ: จบอันดับ 1)")
+    print(f"  {LINE}")
+    title_counts = {t: 0 for t in all_teams}
+    rng2 = np.random.default_rng(99)
+    for _ in range(n_simulations):
+        sim_pts = dict(real_pts)
+        for idx, match in enumerate(remaining_fixtures):
+            home, away = match['HomeTeam'], match['AwayTeam']
+            p_away, p_draw, p_home = proba_matrix[idx]
+            probs = np.array([p_away, p_draw, p_home], dtype=np.float64)
+            probs /= probs.sum()
+            outcome = rng2.choice([0, 1, 2], p=probs)
+            if outcome == 2:   sim_pts[home] += 3
+            elif outcome == 1: sim_pts[home] += 1; sim_pts[away] += 1
+            else:              sim_pts[away] += 3
+        champion = max(sim_pts, key=sim_pts.get)
+        title_counts[champion] += 1
+
+    title_sorted = sorted(title_counts.items(), key=lambda x: x[1], reverse=True)[:8]
+    for team, cnt in title_sorted:
+        pct = round(cnt / n_simulations * 100, 1)
+        bar = '█' * int(pct / 2)
+        if pct > 0:
+            print(f"  {'🥇 ' if pct == max(c for _, c in title_sorted[:1]) / n_simulations * 100 else '   '}"
+                  f"{team:<22} {bar:<30} {pct}%")
+
+    print(f"\n  ✅ Monte Carlo เสร็จสิ้น ({n_simulations:,} simulations)")
+    print(SEP)
+    return results
+
+
+# ──────────────────────────────────────────────────────────────
+# P2-2) DRAW CALIBRATION ANALYSIS
+#       วัดว่าโมเดลทำนาย Draw ดีแค่ไหน vs ความจริง
+# ──────────────────────────────────────────────────────────────
+
+def analyze_draw_calibration():
+    """
+    แบ่ง predicted Draw probability เป็น bins
+    แล้วดูว่า actual draw rate ใน bin นั้นเป็นเท่าไร
+    หากเส้น calibration ชิดเส้น y=x แสดงว่าโมเดล well-calibrated
+    """
+    from sklearn.calibration import calibration_curve
+
+    SEP  = "=" * 65
+    LINE = "─" * 65
+
+    print()
+    print(SEP)
+    print("  📐  DRAW CALIBRATION ANALYSIS")
+    print(SEP)
+
+    # ดึง probability ของ Draw (class 1) บน test set
+    draw_proba = ensemble.predict_proba(X_test_sc)[:, 1]
+    actual_draw = (y_test == 1).astype(int).values
+
+    # Calibration curve (5 bins)
+    n_bins = 8
+    fraction_of_positives, mean_predicted_value = calibration_curve(
+        actual_draw, draw_proba, n_bins=n_bins, strategy='quantile'
+    )
+
+    print(f"\n  Predicted%   Actual%    Diff     Calibration Bar")
+    print(f"  {LINE}")
+
+    total_brier = 0.0
+    for pred_p, act_p in zip(mean_predicted_value, fraction_of_positives):
+        diff  = act_p - pred_p
+        bar_pred = '█' * int(pred_p * 30)
+        bar_act  = '░' * int(act_p  * 30)
+        sign  = "+" if diff >= 0 else "-"
+        flag  = "✅" if abs(diff) < 0.05 else ("⚠️ " if abs(diff) < 0.10 else "❌")
+        print(f"  {pred_p*100:>8.1f}%   {act_p*100:>6.1f}%   {sign}{abs(diff)*100:>4.1f}%  {flag}  "
+              f"pred:{bar_pred:<15} act:{bar_act:<15}")
+        total_brier += (pred_p - act_p) ** 2
+
+    # Brier Score (lower = better, 0.25 = no-skill baseline)
+    from sklearn.metrics import brier_score_loss
+    brier = brier_score_loss(actual_draw, draw_proba)
+    brier_baseline = brier_score_loss(actual_draw, np.full_like(draw_proba, actual_draw.mean()))
+
+    print(f"\n  {LINE}")
+    print(f"  📊 Brier Score (Draw)  : {brier:.4f}  (ยิ่งต่ำยิ่งดี)")
+    print(f"  📊 Baseline Brier      : {brier_baseline:.4f}  (โมเดลสุ่มตาม base rate)")
+    skill = (1 - brier / brier_baseline) * 100
+    print(f"  📊 Brier Skill Score   : {skill:.1f}%  {'✅ ดีกว่า baseline' if skill > 0 else '❌ แย่กว่า baseline'}")
+
+    # Actual draw rate vs predicted
+    avg_pred_draw = draw_proba.mean() * 100
+    avg_act_draw  = actual_draw.mean() * 100
+    print(f"\n  📊 Avg Predicted Draw% : {avg_pred_draw:.1f}%")
+    print(f"  📊 Actual Draw Rate    : {avg_act_draw:.1f}%")
+    bias = avg_pred_draw - avg_act_draw
+    print(f"  📊 Systematic Bias     : {bias:+.1f}%  "
+          f"({'ทำนาย Draw มากเกินจริง' if bias > 2 else 'ทำนาย Draw น้อยเกินจริง' if bias < -2 else 'Bias ต่ำ ✅'})")
+
+    # Suggestion
+    print(f"\n  💡 คำแนะนำ:")
+    if abs(bias) > 5:
+        print(f"  • Recalibrate ด้วย Platt Scaling หรือ Isotonic Regression")
+    if brier > brier_baseline:
+        print(f"  • Draw prediction ยังแย่กว่า baseline — ลอง SMOTE หรือ cost-sensitive learning")
+    else:
+        print(f"  • โมเดล Draw ดีกว่า baseline แต่ยังมีช่องทางปรับปรุง")
+        print(f"  • เพิ่ม feature เฉพาะ Draw เช่น: ทีมที่เสมอบ่อย, เกมคู่ปรับ, Head-to-Head draw rate")
+
+    print(SEP)
+    return {'brier': brier, 'brier_baseline': brier_baseline, 'skill': skill, 'bias': bias}
+
+
+# ──────────────────────────────────────────────────────────────
+# P2-3) SHAP ANALYSIS — วิเคราะห์ feature สำคัญ
+# ──────────────────────────────────────────────────────────────
+
+def run_shap_analysis(max_display=15):
+    """
+    ใช้ TreeExplainer บน XGBoost ใน ensemble
+    วิเคราะห์ว่า feature ไหนส่งผลต่อการทำนายมากที่สุด
+    แสดงผลแบบ ASCII bar chart (3 class: Away Win, Draw, Home Win)
+    """
+    try:
+        import shap
+    except ImportError:
+        print("❌ กรุณาติดตั้ง shap ก่อน: pip install shap")
+        return None
+
+    SEP  = "=" * 65
+    LINE = "─" * 65
+
+    print()
+    print(SEP)
+    print("  🔍  SHAP FEATURE IMPORTANCE ANALYSIS")
+    print(f"  ใช้ XGBoost (ใน Ensemble) + TreeSHAP บน Test Set ({len(X_test)} แมตช์)")
+    print(SEP)
+
+    # ดึง XGB จาก VotingClassifier
+    xgb_model = None
+    for name, estimator in ensemble.estimators:
+        if name == 'xgb':
+            xgb_model = estimator
+            break
+
+    # ใช้ fitted version จาก estimators_
+    if xgb_model is None:
+        print("❌ ไม่พบ XGB ใน ensemble")
+        return None
+
+    # ดึง fitted model จาก estimators_
+    xgb_fitted = None
+    for (name, _), fitted in zip(ensemble.estimators, ensemble.estimators_):
+        if name == 'xgb':
+            xgb_fitted = fitted
+            break
+
+    print("  กำลังคำนวณ SHAP values ...")
+    explainer   = shap.TreeExplainer(xgb_fitted)
+    shap_raw    = explainer.shap_values(X_test_sc)
+
+    # XGBoost รุ่นเก่า → list of 3 arrays (n_samples, n_features)
+    # XGBoost รุ่นใหม่ → single 3D array (n_samples, n_features, n_classes)
+    if isinstance(shap_raw, np.ndarray) and shap_raw.ndim == 3:
+        # (n_samples, n_features, n_classes) → list of (n_samples, n_features)
+        shap_values = [shap_raw[:, :, i] for i in range(shap_raw.shape[2])]
+    elif isinstance(shap_raw, list):
+        shap_values = shap_raw
+    else:
+        # 2D array (binary-like fallback) → wrap in list
+        shap_values = [shap_raw]
+    # shap_values: list of 3 arrays (one per class), each shape (n_test, n_features)
+
+    class_names = ['Away Win', 'Draw', 'Home Win']
+
+    # ── Mean |SHAP| per feature per class ──────────────────────
+    # รวม 3 class เป็น global importance
+    mean_abs_shap = np.zeros(len(FEATURES))
+    for cls_shap in shap_values:
+        mean_abs_shap += np.abs(cls_shap).mean(axis=0)
+    mean_abs_shap /= 3
+
+    # เรียงลำดับ
+    sorted_idx = np.argsort(mean_abs_shap)[::-1][:max_display]
+
+    print(f"\n  📊  Global Feature Importance (Mean |SHAP|, average across 3 classes)")
+    print(f"  {'#':<4} {'Feature':<22} {'SHAP':>8}  {'Bar (relative importance)'}")
+    print(f"  {LINE}")
+
+    max_shap = mean_abs_shap[sorted_idx[0]]
+    for rank, idx in enumerate(sorted_idx, 1):
+        feat  = FEATURES[idx]
+        val   = mean_abs_shap[idx]
+        bar   = '█' * int(val / max_shap * 30)
+        pct   = val / mean_abs_shap.sum() * 100
+        print(f"  {rank:<4} {feat:<22} {val:>8.4f}  {bar:<30} ({pct:.1f}%)")
+
+    # ── Per-Class Top 5 ─────────────────────────────────────────
+    print(f"\n  📋  Top 5 Features แยกตาม Class")
+    print(f"  {LINE}")
+    for cls_idx, cls_name in enumerate(class_names):
+        cls_shap = np.abs(shap_values[cls_idx]).mean(axis=0)
+        top5_idx = np.argsort(cls_shap)[::-1][:5]
+        icon = "✈️ " if cls_idx == 0 else ("🤝" if cls_idx == 1 else "🏠")
+        print(f"\n  {icon}  {cls_name}")
+        for r, i in enumerate(top5_idx, 1):
+            bar = '█' * int(cls_shap[i] / cls_shap[top5_idx[0]] * 20)
+            print(f"      {r}. {FEATURES[i]:<22} {cls_shap[i]:.4f}  {bar}")
+
+    # ── Direction Analysis: ค่า SHAP บวก/ลบ ─────────────────────
+    print(f"\n  🧭  Direction Analysis — Top 5 Features สำหรับ 🏠 Home Win")
+    print(f"  {'Feature':<22} {'Mean SHAP':>10}  {'Direction'}")
+    print(f"  {LINE}")
+    hw_shap     = shap_values[2]   # class 2 = Home Win
+    mean_signed = hw_shap.mean(axis=0)
+    top5_hw     = np.argsort(np.abs(mean_signed))[::-1][:8]
+    for i in top5_hw:
+        direction = "➕ ช่วยให้เหย้าชนะ" if mean_signed[i] > 0 else "➖ ลดโอกาสเหย้าชนะ"
+        print(f"  {FEATURES[i]:<22} {mean_signed[i]:>10.4f}  {direction}")
+
+    # ── Insight Summary ──────────────────────────────────────────
+    top1_feat = FEATURES[sorted_idx[0]]
+    top2_feat = FEATURES[sorted_idx[1]]
+    top3_feat = FEATURES[sorted_idx[2]]
+    print(f"\n  💡 SHAP Insights:")
+    print(f"  • Feature สำคัญที่สุด: {top1_feat}, {top2_feat}, {top3_feat}")
+    elo_features = [FEATURES[i] for i in sorted_idx if 'Elo' in FEATURES[i]]
+    form_features = [FEATURES[i] for i in sorted_idx if 'Pts' in FEATURES[i] or 'GF' in FEATURES[i]]
+    if elo_features:
+        print(f"  • Elo features ติด top: {', '.join(elo_features[:3])}")
+    if form_features:
+        print(f"  • Form features ติด top: {', '.join(form_features[:3])}")
+    print(f"  • หากต้องการเพิ่ม accuracy: เน้นเพิ่มข้อมูลที่เกี่ยวกับ '{top1_feat}' และ '{top2_feat}'")
+
+    print(SEP)
+    return {'mean_abs_shap': mean_abs_shap, 'sorted_idx': sorted_idx,
+            'shap_values': shap_values, 'features': FEATURES}
+
+
+# ──────────────────────────────────────────────────────────────
+# P2-4) PHASE 2 FULL REPORT
+# ──────────────────────────────────────────────────────────────
+
+def run_phase2(n_simulations=1000):
+    """รัน Phase 2 ทั้งหมด"""
+    print()
+    print("█" * 65)
+    print("  🚀  PHASE 2 — COMPETITION GRADE ANALYSIS")
+    print("█" * 65)
+
+    # 1. Monte Carlo
+    mc_results = run_monte_carlo(n_simulations=n_simulations, verbose=True)
+
+    # 2. Draw Calibration
+    draw_stats = analyze_draw_calibration()
+
+    # 3. SHAP
+    shap_results = run_shap_analysis(max_display=15)
+
+    # ── Phase 2 Summary ─────────────────────────────────────────
+    SEP = "=" * 65
+    print()
+    print(SEP)
+    print("  📋  PHASE 2 — SUMMARY")
+    print(SEP)
+
+    if mc_results:
+        # Top 4 ที่น่าจะเกิดขึ้น
+        top4_sorted = sorted(mc_results.items(), key=lambda x: x[1]['top4'], reverse=True)[:6]
+        print(f"\n  🔴  Top 4 Probability (จาก {n_simulations:,} simulations)")
+        for team, r in top4_sorted:
+            bar = '█' * int(r['top4'] / 5)
+            print(f"      {team:<22} {bar:<20} {r['top4']}%")
+
+        rel_sorted = sorted(mc_results.items(), key=lambda x: x[1]['relegation'], reverse=True)[:5]
+        print(f"\n  🟡  Relegation Probability")
+        for team, r in rel_sorted:
+            if r['relegation'] > 0:
+                bar = '▓' * int(r['relegation'] / 5)
+                print(f"      {team:<22} {bar:<20} {r['relegation']}%")
+
+    if draw_stats:
+        print(f"\n  📐  Draw Calibration")
+        print(f"      Brier Skill Score : {draw_stats['skill']:.1f}%")
+        print(f"      Systematic Bias   : {draw_stats['bias']:+.1f}%")
+
+    print()
+    print(SEP)
+    print("  ✅  PHASE 2 COMPLETE")
+    print(SEP)
+    print()
+
+    return {'monte_carlo': mc_results, 'draw_cal': draw_stats, 'shap': shap_results}
+
+
+# ==============================
+# 🚀 เรียกใช้งาน
+# ==============================
+
+# ── STEP 1: อัปเดต CSV จาก API ก่อนเสมอ (ข้อมูลล่าสุด 100%) ──
+update_season_csv_from_api()
+
+# ── STEP 2: จำลองฤดูกาลด้วยข้อมูลล่าสุด ──
+run_season_simulation()
+
+# ── STEP 3: ทำนายทีมที่ต้องการ ──
+predict_with_api("Arsenal")
+# predict_with_api("Liverpool")
+# predict_with_api("Man City")
+# predict_with_api("Chelsea")
+# predict_with_api("Aston Villa")
+
+# ── STEP 4: แสดงตารางแข่ง PL ถัดไปพร้อมทำนาย ──
+show_next_pl_fixtures(5)    # 5 นัดถัดไป
+# show_next_pl_fixtures(10)  # 10 นัด
+# show_next_pl_fixtures(20)  # 20 นัด
+
+# ── STEP 5: สรุปทั้งหมด ──
 print_full_summary()
+
+# ── STEP 6: Phase 2 — Competition Grade Analysis ──
+# Monte Carlo 1000 รอบ + Draw Calibration + SHAP
+# (ต้องติดตั้ง shap ก่อน: pip install shap)
+run_phase2(n_simulations=1000)
