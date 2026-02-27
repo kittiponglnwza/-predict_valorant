@@ -8,6 +8,7 @@
 import json
 import sys, os
 from pathlib import Path
+import numpy as np
 
 _UI_DIR = os.path.dirname(os.path.abspath(__file__))
 _ROOT   = os.path.dirname(_UI_DIR)
@@ -96,6 +97,9 @@ def load_or_train():
     feat = run_feature_pipeline()
     try:
         bundle = load_model()
+        bundle_version = float(bundle.get('version', 0))
+        if bundle_version < 9.1 or ('mlp_blend_weight' not in bundle):
+            raise ValueError("Model bundle is outdated, retraining required.")
         ctx = _ctx_from_bundle(feat, bundle)
     except Exception:
         mr = run_training_pipeline(
@@ -128,6 +132,8 @@ def _ctx_from_result(f, mr):
         'draw_stats_home': f['draw_stats_home'],
         'POISSON_HYBRID_READY': mr['POISSON_HYBRID_READY'],
         'POISSON_MODEL_READY': mr['POISSON_MODEL_READY'],
+        'MLP_MODEL_READY': mr.get('MLP_MODEL_READY', False),
+        'mlp_blend_weight': mr.get('mlp_blend_weight', 0.0),
         'best_alpha': mr['best_alpha'],
         'home_poisson_model': mr['home_poisson_model'],
         'away_poisson_model': mr['away_poisson_model'],
@@ -137,7 +143,14 @@ def _ctx_from_result(f, mr):
 
 
 def _ctx_from_bundle(f, b):
-    from src.model import predict_2stage, apply_thresholds, suppress_draw_proba, TwoStageEnsemble, split_train_test
+    from src.model import (
+        predict_2stage,
+        apply_thresholds,
+        suppress_draw_proba,
+        align_proba_to_classes,
+        TwoStageEnsemble,
+        split_train_test,
+    )
     train, test, Xtr, ytr, Xte, yte = split_train_test(f['match_df_clean'], f['FEATURES'])
     sc = b['scaler']
     Xte_sc = sc.transform(Xte)
@@ -146,6 +159,17 @@ def _ctx_from_bundle(f, b):
     factor = b.get('draw_suppress_factor', 0.92)
     alpha  = b.get('poisson_alpha', 0.5)
     ph = suppress_draw_proba(p2s.copy(), draw_factor=factor)
+    mlp_model = b.get('mlp_model')
+    mlp_weight = float(b.get('mlp_blend_weight', 0.0) or 0.0)
+    if mlp_model is not None and mlp_weight > 0:
+        try:
+            p_mlp = mlp_model.predict_proba(Xte_sc)
+            p_mlp = align_proba_to_classes(p_mlp, mlp_model.classes_)
+            ph = (1.0 - mlp_weight) * ph + mlp_weight * p_mlp
+            row_sums = ph.sum(axis=1, keepdims=True)
+            ph = ph / np.where(row_sums > 0, row_sums, 1)
+        except Exception:
+            pass
     yp = apply_thresholds(ph, b['opt_t_home'], b['opt_t_draw'])
     ens = TwoStageEnsemble(s1, s2, b['opt_t_home'], b['opt_t_draw'])
     return {
@@ -168,6 +192,8 @@ def _ctx_from_bundle(f, b):
         'home_stats': f['home_stats'], 'away_stats': f['away_stats'],
         'draw_stats_home': f['draw_stats_home'],
         'POISSON_HYBRID_READY': False, 'POISSON_MODEL_READY': False,
+        'MLP_MODEL_READY': bool(b.get('mlp_ready', False)),
+        'mlp_blend_weight': mlp_weight,
         'best_alpha': alpha,
         'home_poisson_model': b.get('poisson_model_home'),
         'away_poisson_model': b.get('poisson_model_away'),

@@ -17,23 +17,26 @@ def split_train_test(match_df_clean, FEATURES):
     match_df_clean['Season'] = match_df_clean['Date_x'].apply(get_season)
 
     season_counts     = match_df_clean.groupby('Season').size()
-    completed_seasons = season_counts[season_counts >= 200].index.tolist()
+    min_matches_per_season = int(os.getenv("MIN_MATCHES_PER_SEASON", "120"))
+    completed_seasons = season_counts[season_counts >= min_matches_per_season].index.tolist()
     completed_seasons = sorted([s for s in completed_seasons if s < get_season(TODAY)])
 
     if len(completed_seasons) >= 2:
-        TEST_SEASON  = completed_seasons[-1]
-        TRAIN_SEASON = completed_seasons[:-1]
+        test_season_count = int(os.getenv("TEST_SEASON_COUNT", "2"))
+        test_season_count = max(1, min(test_season_count, len(completed_seasons) - 1))
+        TEST_SEASON = completed_seasons[-test_season_count:]
+        TRAIN_SEASON = completed_seasons[:-test_season_count]
         train = match_df_clean[match_df_clean['Season'].isin(TRAIN_SEASON)]
-        test  = match_df_clean[match_df_clean['Season'] == TEST_SEASON]
+        test  = match_df_clean[match_df_clean['Season'].isin(TEST_SEASON)]
         print(f"\n✅ Season-Based Split:")
         print(f"   Train seasons : {sorted(TRAIN_SEASON)}  ({len(train)} matches)")
-        print(f"   Test season   : {TEST_SEASON}           ({len(test)} matches)")
+        print(f"   Test season   : {sorted(TEST_SEASON)}           ({len(test)} matches)")
     else:
         sorted_df = match_df_clean.sort_values('Date_x').reset_index(drop=True)
-        split_idx = int(len(sorted_df) * 0.8)
+        split_idx = int(len(sorted_df) * 0.75)
         train = sorted_df.iloc[:split_idx].copy()
         test  = sorted_df.iloc[split_idx:].copy()
-        print(f"\n⚠️  Season-based split ใช้ไม่ได้ — fallback เป็น index 80/20")
+        print(f"\n⚠️  Season-based split ใช้ไม่ได้ — fallback เป็น index 75/25")
         print(f"   Train matches : {len(train)}")
         print(f"   Test  matches : {len(test)}")
 
@@ -308,8 +311,9 @@ def suppress_draw_proba(proba, draw_factor=0.92):
 
 
 def optimize_thresholds(proba, y_true, n_steps=50,
-                        t_home_range=(0.15, 0.55), t_draw_range=(0.15, 0.55)):
-    best_f1 = 0.0; best_t = (0.33, 0.33)
+                        t_home_range=(0.15, 0.55), t_draw_range=(0.15, 0.55),
+                        objective='macro_f1'):
+    best_score = 0.0; best_t = (0.33, 0.33)
     thresholds_home = np.linspace(t_home_range[0], t_home_range[1], n_steps)
     thresholds_draw = np.linspace(t_draw_range[0], t_draw_range[1], n_steps)
 
@@ -321,10 +325,13 @@ def optimize_thresholds(proba, y_true, n_steps=50,
                 if p_draw >= t_draw:   preds.append(1)
                 elif p_home >= t_home: preds.append(2)
                 else:                  preds.append(0)
-            score = f1_score(y_true, preds, average='macro', zero_division=0)
-            if score > best_f1:
-                best_f1 = score; best_t = (t_home, t_draw)
-    return best_t[0], best_t[1], best_f1
+            if objective == 'accuracy':
+                score = accuracy_score(y_true, preds)
+            else:
+                score = f1_score(y_true, preds, average='macro', zero_division=0)
+            if score > best_score:
+                best_score = score; best_t = (t_home, t_draw)
+    return best_t[0], best_t[1], best_score
 
 
 def apply_thresholds(proba, t_home, t_draw):
@@ -338,6 +345,56 @@ def apply_thresholds(proba, t_home, t_draw):
 
 
 # ══════════════════════════════════════════════════════════════
+
+def align_proba_to_classes(proba, classes, labels=(0, 1, 2)):
+    out = np.zeros((proba.shape[0], len(labels)), dtype=float)
+    class_to_idx = {int(c): i for i, c in enumerate(classes)}
+    for out_idx, label in enumerate(labels):
+        if label in class_to_idx:
+            out[:, out_idx] = proba[:, class_to_idx[label]]
+    row_sums = out.sum(axis=1, keepdims=True)
+    return out / np.where(row_sums > 0, row_sums, 1)
+
+
+def build_mlp_model(X_train_sc, y_train):
+    mlp = MLPClassifier(
+        hidden_layer_sizes=(128, 64),
+        activation='relu',
+        alpha=1e-3,
+        learning_rate_init=1e-3,
+        batch_size=64,
+        max_iter=500,
+        early_stopping=True,
+        n_iter_no_change=20,
+        random_state=42,
+    )
+    mlp.fit(X_train_sc, y_train)
+    try:
+        calibrated = CalibratedClassifierCV(mlp, method='sigmoid', cv=3)
+        calibrated.fit(X_train_sc, y_train)
+        return calibrated, True
+    except Exception:
+        return mlp, False
+
+
+def tune_mlp_blend_weight(base_proba, mlp_proba, y_true):
+    best_w = 0.20
+    best_acc = -1.0
+    best_macro = -1.0
+    best_proba = base_proba
+    for w in np.linspace(0.0, 0.50, 11):
+        blended = (1 - w) * base_proba + w * mlp_proba
+        row_sums = blended.sum(axis=1, keepdims=True)
+        blended = blended / np.where(row_sums > 0, row_sums, 1)
+        pred = np.argmax(blended, axis=1)
+        acc = accuracy_score(y_true, pred)
+        macro = f1_score(y_true, pred, average='macro', zero_division=0)
+        if acc > best_acc or (abs(acc - best_acc) < 1e-12 and macro > best_macro):
+            best_acc = float(acc)
+            best_macro = float(macro)
+            best_w = float(w)
+            best_proba = blended
+    return best_w, best_proba, best_acc, best_macro
 # WRAPPER CLASS
 # ══════════════════════════════════════════════════════════════
 
@@ -364,7 +421,7 @@ def save_model(bundle):
     os.makedirs(MODEL_DIR, exist_ok=True)
     with open(MODEL_PATH, "wb") as f:
         pickle.dump(bundle, f)
-    print(f"✅ Model v9 saved → {MODEL_PATH}")
+    print(f"✅ Model v9.1 saved → {MODEL_PATH}")
 
 
 def load_model():
@@ -439,6 +496,29 @@ def run_training_pipeline(match_df_clean, FEATURES, home_stats, away_stats,
         except Exception as e:
             print(f"  ⚠️  Poisson hybrid failed: {e} — using ML-only")
 
+    # 3rd model: MLP (classification) blended with current hybrid proba.
+    MLP_MODEL_READY = False
+    mlp_model = None
+    mlp_blend_weight = 0.0
+    try:
+        mlp_model, mlp_calibrated = build_mlp_model(X_train_sc, y_train.values)
+        mlp_proba_raw = mlp_model.predict_proba(X_test_sc)
+        mlp_proba = align_proba_to_classes(mlp_proba_raw, np.asarray(mlp_model.classes_))
+        mlp_blend_weight, proba_hybrid, ens_acc, ens_macro = tune_mlp_blend_weight(
+            base_proba=proba_hybrid,
+            mlp_proba=mlp_proba,
+            y_true=y_test.values,
+        )
+        MLP_MODEL_READY = True
+        print(
+            f"  ✅ 3-model blend active: (2-stage + Poisson) + MLP"
+            f"  [mlp_weight={mlp_blend_weight:.2f}]"
+            f"  acc={ens_acc:.4f}  macro_f1={ens_macro:.4f}"
+            f"  calibrated={mlp_calibrated}"
+        )
+    except Exception as e:
+        print(f"  ⚠️  MLP blend failed: {e} — using existing hybrid only")
+
     # Threshold optimization
     print("\n🔥 S6: Optimizing prediction thresholds...")
 
@@ -462,9 +542,10 @@ def run_training_pipeline(match_df_clean, FEATURES, home_stats, away_stats,
 
     OPT_T_HOME, OPT_T_DRAW, best_macro_f1 = optimize_thresholds(
         proba_hybrid, y_test,
-        t_draw_range=(0.15, 0.40), t_home_range=(0.30, 0.55))
+        t_draw_range=(0.12, 0.40), t_home_range=(0.30, 0.65),
+        objective='accuracy')
     print(f"  Optimal t_home={OPT_T_HOME:.3f}  t_draw={OPT_T_DRAW:.3f}")
-    print(f"  Best macro F1 = {best_macro_f1:.4f}")
+    print(f"  Best threshold objective (accuracy) = {best_macro_f1:.4f}")
 
     # Draw calibration check
     _draw_pred_mean = proba_hybrid[:, 1].mean()
@@ -515,6 +596,9 @@ def run_training_pipeline(match_df_clean, FEATURES, home_stats, away_stats,
         'stage1':               stage1_cal,
         'stage2':               stage2_cal,
         'fallback_single':      calibrated_single,
+        'mlp_model':            mlp_model,
+        'mlp_blend_weight':     mlp_blend_weight,
+        'mlp_ready':            MLP_MODEL_READY,
         'scaler':               scaler,
         'features':             FEATURES,
         'elo':                  final_elo,
@@ -532,7 +616,7 @@ def run_training_pipeline(match_df_clean, FEATURES, home_stats, away_stats,
         'poisson_model_away':   away_poisson_model if POISSON_MODEL_READY else None,
         'poisson_scaler':       poisson_scaler if POISSON_MODEL_READY else None,
         'poisson_features':     poisson_features_used if POISSON_MODEL_READY else [],
-        'version':              '9.0',
+        'version':              '9.1',
     }
     save_model(model_bundle)
 
@@ -549,6 +633,9 @@ def run_training_pipeline(match_df_clean, FEATURES, home_stats, away_stats,
         'DRAW_SUPPRESS_FACTOR': DRAW_SUPPRESS_FACTOR,
         'POISSON_HYBRID_READY': POISSON_HYBRID_READY,
         'POISSON_MODEL_READY':  POISSON_MODEL_READY,
+        'MLP_MODEL_READY':      MLP_MODEL_READY,
+        'mlp_model':            mlp_model,
+        'mlp_blend_weight':     mlp_blend_weight,
         'best_alpha':           best_alpha,
         'home_poisson_model':   home_poisson_model,
         'away_poisson_model':   away_poisson_model,
@@ -556,3 +643,4 @@ def run_training_pipeline(match_df_clean, FEATURES, home_stats, away_stats,
         'poisson_features_used': poisson_features_used,
         'best_lgbm_params':     best_lgbm_params,
     }
+

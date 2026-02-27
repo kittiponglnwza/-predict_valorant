@@ -21,7 +21,13 @@ def load_data():
     df_list = [pd.read_csv(f) for f in files]
     data = pd.concat(df_list, ignore_index=True).copy()
     data['MatchID'] = data.index
-    data['Date']    = pd.to_datetime(data['Date'], dayfirst=True, errors='coerce')
+    # Robust date parsing for mixed CSV formats:
+    # 1) day-first pass, 2) fallback month-first for remaining NaT rows.
+    date_dayfirst = pd.to_datetime(data['Date'], dayfirst=True, errors='coerce')
+    if date_dayfirst.isna().any():
+        date_monthfirst = pd.to_datetime(data.loc[date_dayfirst.isna(), 'Date'], dayfirst=False, errors='coerce')
+        date_dayfirst.loc[date_dayfirst.isna()] = date_monthfirst
+    data['Date'] = date_dayfirst
     data            = data.sort_values('Date').reset_index(drop=True)
     season_series = np.where(data['Date'].dt.month >= 8, data['Date'].dt.year, data['Date'].dt.year - 1)
     season_count = int(pd.Series(season_series).dropna().nunique())
