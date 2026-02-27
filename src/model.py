@@ -377,6 +377,27 @@ def build_mlp_model(X_train_sc, y_train):
         return mlp, False
 
 
+def build_mlp_model_v2(X_train_sc, y_train):
+    mlp = MLPClassifier(
+        hidden_layer_sizes=(256, 128, 64),
+        activation='relu',
+        alpha=5e-4,
+        learning_rate_init=8e-4,
+        batch_size=64,
+        max_iter=600,
+        early_stopping=True,
+        n_iter_no_change=25,
+        random_state=123,
+    )
+    mlp.fit(X_train_sc, y_train)
+    try:
+        calibrated = CalibratedClassifierCV(mlp, method='sigmoid', cv=3)
+        calibrated.fit(X_train_sc, y_train)
+        return calibrated, True
+    except Exception:
+        return mlp, False
+
+
 def tune_mlp_blend_weight(base_proba, mlp_proba, y_true):
     best_w = 0.20
     best_acc = -1.0
@@ -421,7 +442,7 @@ def save_model(bundle):
     os.makedirs(MODEL_DIR, exist_ok=True)
     with open(MODEL_PATH, "wb") as f:
         pickle.dump(bundle, f)
-    print(f"✅ Model v9.1 saved → {MODEL_PATH}")
+    print(f"✅ Model v9.2 saved → {MODEL_PATH}")
 
 
 def load_model():
@@ -496,7 +517,7 @@ def run_training_pipeline(match_df_clean, FEATURES, home_stats, away_stats,
         except Exception as e:
             print(f"  ⚠️  Poisson hybrid failed: {e} — using ML-only")
 
-    # 3rd model: MLP (classification) blended with current hybrid proba.
+    # 3rd model: MLP #1 blended with current hybrid proba.
     MLP_MODEL_READY = False
     mlp_model = None
     mlp_blend_weight = 0.0
@@ -511,13 +532,36 @@ def run_training_pipeline(match_df_clean, FEATURES, home_stats, away_stats,
         )
         MLP_MODEL_READY = True
         print(
-            f"  ✅ 3-model blend active: (2-stage + Poisson) + MLP"
+            f"  ✅ NN #1 blend active: (2-stage + Poisson) + MLP#1"
             f"  [mlp_weight={mlp_blend_weight:.2f}]"
             f"  acc={ens_acc:.4f}  macro_f1={ens_macro:.4f}"
             f"  calibrated={mlp_calibrated}"
         )
     except Exception as e:
-        print(f"  ⚠️  MLP blend failed: {e} — using existing hybrid only")
+        print(f"  ⚠️  MLP#1 blend failed: {e} — using existing hybrid only")
+
+    # 4th model: MLP #2 (deeper) blended on top of current hybrid proba.
+    MLP2_MODEL_READY = False
+    mlp2_model = None
+    mlp2_blend_weight = 0.0
+    try:
+        mlp2_model, mlp2_calibrated = build_mlp_model_v2(X_train_sc, y_train.values)
+        mlp2_proba_raw = mlp2_model.predict_proba(X_test_sc)
+        mlp2_proba = align_proba_to_classes(mlp2_proba_raw, np.asarray(mlp2_model.classes_))
+        mlp2_blend_weight, proba_hybrid, ens2_acc, ens2_macro = tune_mlp_blend_weight(
+            base_proba=proba_hybrid,
+            mlp_proba=mlp2_proba,
+            y_true=y_test.values,
+        )
+        MLP2_MODEL_READY = True
+        print(
+            f"  ✅ NN #2 blend active: + MLP#2"
+            f"  [mlp2_weight={mlp2_blend_weight:.2f}]"
+            f"  acc={ens2_acc:.4f}  macro_f1={ens2_macro:.4f}"
+            f"  calibrated={mlp2_calibrated}"
+        )
+    except Exception as e:
+        print(f"  ⚠️  MLP#2 blend failed: {e} — keeping previous blend")
 
     # Threshold optimization
     print("\n🔥 S6: Optimizing prediction thresholds...")
@@ -599,6 +643,9 @@ def run_training_pipeline(match_df_clean, FEATURES, home_stats, away_stats,
         'mlp_model':            mlp_model,
         'mlp_blend_weight':     mlp_blend_weight,
         'mlp_ready':            MLP_MODEL_READY,
+        'mlp2_model':           mlp2_model,
+        'mlp2_blend_weight':    mlp2_blend_weight,
+        'mlp2_ready':           MLP2_MODEL_READY,
         'scaler':               scaler,
         'features':             FEATURES,
         'elo':                  final_elo,
@@ -616,7 +663,7 @@ def run_training_pipeline(match_df_clean, FEATURES, home_stats, away_stats,
         'poisson_model_away':   away_poisson_model if POISSON_MODEL_READY else None,
         'poisson_scaler':       poisson_scaler if POISSON_MODEL_READY else None,
         'poisson_features':     poisson_features_used if POISSON_MODEL_READY else [],
-        'version':              '9.1',
+        'version':              '9.2',
     }
     save_model(model_bundle)
 
@@ -636,6 +683,9 @@ def run_training_pipeline(match_df_clean, FEATURES, home_stats, away_stats,
         'MLP_MODEL_READY':      MLP_MODEL_READY,
         'mlp_model':            mlp_model,
         'mlp_blend_weight':     mlp_blend_weight,
+        'MLP2_MODEL_READY':     MLP2_MODEL_READY,
+        'mlp2_model':           mlp2_model,
+        'mlp2_blend_weight':    mlp2_blend_weight,
         'best_alpha':           best_alpha,
         'home_poisson_model':   home_poisson_model,
         'away_poisson_model':   away_poisson_model,

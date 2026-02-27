@@ -98,7 +98,7 @@ def load_or_train():
     try:
         bundle = load_model()
         bundle_version = float(bundle.get('version', 0))
-        if bundle_version < 9.1 or ('mlp_blend_weight' not in bundle):
+        if bundle_version < 9.2 or ('mlp2_blend_weight' not in bundle):
             raise ValueError("Model bundle is outdated, retraining required.")
         ctx = _ctx_from_bundle(feat, bundle)
     except Exception:
@@ -134,6 +134,8 @@ def _ctx_from_result(f, mr):
         'POISSON_MODEL_READY': mr['POISSON_MODEL_READY'],
         'MLP_MODEL_READY': mr.get('MLP_MODEL_READY', False),
         'mlp_blend_weight': mr.get('mlp_blend_weight', 0.0),
+        'MLP2_MODEL_READY': mr.get('MLP2_MODEL_READY', False),
+        'mlp2_blend_weight': mr.get('mlp2_blend_weight', 0.0),
         'best_alpha': mr['best_alpha'],
         'home_poisson_model': mr['home_poisson_model'],
         'away_poisson_model': mr['away_poisson_model'],
@@ -170,6 +172,17 @@ def _ctx_from_bundle(f, b):
             ph = ph / np.where(row_sums > 0, row_sums, 1)
         except Exception:
             pass
+    mlp2_model = b.get('mlp2_model')
+    mlp2_weight = float(b.get('mlp2_blend_weight', 0.0) or 0.0)
+    if mlp2_model is not None and mlp2_weight > 0:
+        try:
+            p_mlp2 = mlp2_model.predict_proba(Xte_sc)
+            p_mlp2 = align_proba_to_classes(p_mlp2, mlp2_model.classes_)
+            ph = (1.0 - mlp2_weight) * ph + mlp2_weight * p_mlp2
+            row_sums = ph.sum(axis=1, keepdims=True)
+            ph = ph / np.where(row_sums > 0, row_sums, 1)
+        except Exception:
+            pass
     yp = apply_thresholds(ph, b['opt_t_home'], b['opt_t_draw'])
     ens = TwoStageEnsemble(s1, s2, b['opt_t_home'], b['opt_t_draw'])
     return {
@@ -194,6 +207,8 @@ def _ctx_from_bundle(f, b):
         'POISSON_HYBRID_READY': False, 'POISSON_MODEL_READY': False,
         'MLP_MODEL_READY': bool(b.get('mlp_ready', False)),
         'mlp_blend_weight': mlp_weight,
+        'MLP2_MODEL_READY': bool(b.get('mlp2_ready', False)),
+        'mlp2_blend_weight': mlp2_weight,
         'best_alpha': alpha,
         'home_poisson_model': b.get('poisson_model_home'),
         'away_poisson_model': b.get('poisson_model_away'),

@@ -323,8 +323,9 @@ def predict_match(home_team, away_team, ctx, match_date=None):
     if away_team in NEW_TEAMS_BOOTSTRAPPED:
         print(f"  ℹ️  {away_team}: ใช้ bootstrap stats (ทีมใหม่/เลื่อนชั้น)")
 
-    row  = build_match_row(home_team, away_team, ctx, match_date)
-    X    = pd.DataFrame([row])[FEATURES].fillna(0)
+    row = build_match_row(home_team, away_team, ctx, match_date)
+    # Keep inference robust when training features evolve (e.g., market/xG additions).
+    X = pd.DataFrame([row]).reindex(columns=FEATURES, fill_value=0).fillna(0)
     X_sc = scaler.transform(X)
 
     # 2-Stage ML prediction
@@ -333,7 +334,7 @@ def predict_match(home_team, away_team, ctx, match_date=None):
     # Poisson Hybrid blend
     if POISSON_HYBRID_READY:
         try:
-            pf_row = pd.DataFrame([row])[poisson_features_used].fillna(0)
+            pf_row = pd.DataFrame([row]).reindex(columns=poisson_features_used, fill_value=0).fillna(0)
             pf_sc  = poisson_scaler.transform(pf_row)
             hxg    = float(np.clip(home_poisson_model.predict(pf_sc)[0], 0.3, 6.0))
             axg    = float(np.clip(away_poisson_model.predict(pf_sc)[0], 0.3, 6.0))
@@ -414,7 +415,7 @@ def predict_score(home_team, away_team, ctx):
 
     if POISSON_MODEL_READY:
         row    = build_match_row(home_team, away_team, ctx)
-        pf_row = pd.DataFrame([row])[poisson_features_used].fillna(0)
+        pf_row = pd.DataFrame([row]).reindex(columns=poisson_features_used, fill_value=0).fillna(0)
         pf_sc  = poisson_scaler.transform(pf_row)
         home_xg = float(np.clip(home_poisson_model.predict(pf_sc)[0], 0.3, 6.0))
         away_xg = float(np.clip(away_poisson_model.predict(pf_sc)[0], 0.3, 6.0))
@@ -635,7 +636,8 @@ def run_season_simulation(ctx):
             row['AwayTeam'] = match['AwayTeam']
             future_rows.append(row)
         future_df = pd.DataFrame(future_rows)
-        X_future  = scaler.transform(future_df[FEATURES].fillna(0))
+        X_future_df = future_df.reindex(columns=FEATURES, fill_value=0).fillna(0)
+        X_future  = scaler.transform(X_future_df)
         future_df['Pred'] = ensemble.predict(X_future)
 
         for _, row in future_df.iterrows():
