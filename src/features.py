@@ -23,10 +23,19 @@ def load_data():
     data['MatchID'] = data.index
     data['Date']    = pd.to_datetime(data['Date'], dayfirst=True, errors='coerce')
     data            = data.sort_values('Date').reset_index(drop=True)
+    season_series = np.where(data['Date'].dt.month >= 8, data['Date'].dt.year, data['Date'].dt.year - 1)
+    season_count = int(pd.Series(season_series).dropna().nunique())
+    recommended_seasons = int(os.getenv("MIN_RECOMMENDED_SEASONS", "8"))
 
     print("\n===== DATA INFO =====")
     print("Total matches:", len(data))
     print("Date range:", data['Date'].min(), "→", data['Date'].max())
+    print(f"Detected seasons: {season_count}  (recommended >= {recommended_seasons})")
+    if season_count < recommended_seasons:
+        print(
+            f"⚠️  History is shorter than recommendation: {season_count} seasons. "
+            "Model variance may be high."
+        )
     return data
 
 

@@ -31,12 +31,19 @@ from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
 from scipy.stats import poisson
 import requests
 
+# Environment flag helper
+def _env_flag(name, default=False):
+    val = os.getenv(name)
+    if val is None:
+        return bool(default)
+    return str(val).strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+
 # ══════════════════════════════════════════════════════════════
 # CONFIG FLAGS — แก้ตรงนี้เพื่อเปิด/ปิด features
 # ══════════════════════════════════════════════════════════════
 
 # แกนหลัก: Football model ไม่พึ่ง market odds
-USE_MARKET_FEATURES = False
+USE_MARKET_FEATURES = _env_flag('USE_MARKET_FEATURES', True)
 
 # API key สำหรับดึงข้อมูลแมตช์
 API_KEY = "745c5b802b204590bfa05c093f00bd43"
@@ -51,7 +58,16 @@ try:
 except ImportError:
     lgb = None
     LGBM_AVAILABLE = False
-    print("⚠️  LightGBM not found — pip install lightgbm  (falling back to GBT)")
+    print("LightGBM not found - pip install lightgbm (falling back to GBT)")
+
+try:
+    from catboost import CatBoostClassifier
+    CATBOOST_AVAILABLE = True
+    print("CatBoost available")
+except ImportError:
+    CatBoostClassifier = None
+    CATBOOST_AVAILABLE = False
+    print("CatBoost not found - pip install catboost (skipping CatBoost ensemble)")
 
 # 🔥 SHAP — feature importance
 try:
@@ -164,3 +180,4 @@ def get_bootstrap_features(team):
     feats = _BOOTSTRAP_DEFAULTS[tier].copy()
     feats['Elo_HA'] = info.get('elo', feats['Elo_HA'])
     return feats
+

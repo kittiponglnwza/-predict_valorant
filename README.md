@@ -194,3 +194,24 @@ python -m streamlit run ui/app_ui.py
 and program
 
 python app.py
+
+## STABILIZE (Accuracy-First)
+
+```bash
+# optional: force market features on/off
+set USE_MARKET_FEATURES=1
+
+# optional: tune target metric and recall guardrails
+set STABILIZE_SELECTION_METRIC=accuracy
+set STABILIZE_MIN_RECALL_DRAW=0.10
+set STABILIZE_MIN_RECALL_HOME=0.08
+set STABILIZE_MIN_RECALL_AWAY=0.08
+
+# run rolling-origin backtest + tuning + profile selection
+python -m pipelines.train_pipeline
+```
+
+Notes:
+- Pipeline now compares `no_market` vs `with_market` profile and selects by average validation accuracy.
+- Ensemble tuning includes LightGBM, CatBoost (if installed), and Poisson blend.
+- Holdout uses frozen settings from validation only (draw weight, sigmoid flag, blend weights, thresholds).

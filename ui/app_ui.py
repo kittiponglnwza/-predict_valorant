@@ -45,6 +45,8 @@ def _bind_stabilize_to_ctx(ctx):
     ctx['stabilize_report_path'] = str(STABILIZE_REPORT_PATH)
     ctx['stabilize_summary'] = {}
     ctx['stabilize_settings'] = {}
+    ctx['stabilize_selected_profile'] = None
+    ctx['stabilize_metric_views'] = {}
     ctx['stabilize_mode'] = "monitoring_only"
 
     report = _load_stabilize_report()
@@ -55,6 +57,8 @@ def _bind_stabilize_to_ctx(ctx):
     ctx['stabilize_summary'] = report.get('summary', {})
     cfg = report.get('selected_settings', {}).get('global_from_validation', {})
     ctx['stabilize_settings'] = cfg
+    ctx['stabilize_selected_profile'] = report.get('selected_profile')
+    ctx['stabilize_metric_views'] = report.get('metric_views', {})
     return ctx
 
 

@@ -38,9 +38,9 @@ def page_update(ctx):
         sm = ctx.get('stabilize_summary', {})
         if sm:
             c1, c2, c3 = st.columns(3)
-            c1.metric("Val Macro-F1", f"{sm.get('avg_val_macro_f1_after', 0):.3f}")
-            c2.metric("Holdout Macro-F1", f"{sm.get('final_holdout_macro_f1_after', 0):.3f}")
-            c3.metric("Holdout Draw Recall", f"{sm.get('final_holdout_draw_recall_after', 0):.3f}")
+            c1.metric("Val Accuracy", f"{sm.get('avg_val_accuracy_after', 0):.3f}")
+            c2.metric("Holdout Accuracy", f"{sm.get('final_holdout_accuracy_after', 0):.3f}")
+            c3.metric("Holdout Macro-F1", f"{sm.get('final_holdout_macro_f1_after', 0):.3f}")
     else:
         st.warning("STABILIZE report not linked yet.")
 

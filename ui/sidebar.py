@@ -278,7 +278,10 @@ def render_sidebar(ctx=None):
             cfg = ctx.get('stabilize_settings', {})
             t_home = cfg.get('t_home')
             t_draw = cfg.get('t_draw')
+            selected_profile = ctx.get('stabilize_selected_profile')
             st.caption('STABILIZE linked (monitoring only).')
+            if selected_profile:
+                st.caption(f"profile: {selected_profile}")
             if t_home is not None and t_draw is not None:
                 st.caption(f"report thresholds: home={float(t_home):.3f}, draw={float(t_draw):.3f}")
         else:

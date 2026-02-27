@@ -4,7 +4,7 @@ from typing import Any
 
 import numpy as np
 from sklearn.calibration import calibration_curve
-from sklearn.metrics import f1_score, log_loss, recall_score
+from sklearn.metrics import accuracy_score, f1_score, log_loss, recall_score
 
 
 def multiclass_brier_score(y_true: np.ndarray, y_proba: np.ndarray, n_classes: int) -> float:
@@ -31,6 +31,7 @@ def evaluate_classifier(
 
     ll = float(log_loss(y_true, y_proba, labels=list(labels)))
     brier = multiclass_brier_score(y_true, y_proba, n_classes=len(labels))
+    acc = float(accuracy_score(y_true, y_pred))
     macro_f1 = float(f1_score(y_true, y_pred, average="macro"))
     recalls = recall_score(y_true, y_pred, labels=list(labels), average=None, zero_division=0)
 
@@ -49,6 +50,7 @@ def evaluate_classifier(
         }
 
     return {
+        "accuracy": acc,
         "log_loss": ll,
         "brier_score": brier,
         "macro_f1": macro_f1,
