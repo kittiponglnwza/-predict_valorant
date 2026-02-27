@@ -278,9 +278,9 @@ def render_sidebar(ctx=None):
             cfg = ctx.get('stabilize_settings', {})
             t_home = cfg.get('t_home')
             t_draw = cfg.get('t_draw')
-            st.caption('STABILIZE linked to UI runtime.')
+            st.caption('STABILIZE linked (monitoring only).')
             if t_home is not None and t_draw is not None:
-                st.caption(f"thresholds: home={float(t_home):.3f}, draw={float(t_draw):.3f}")
+                st.caption(f"report thresholds: home={float(t_home):.3f}, draw={float(t_draw):.3f}")
         else:
             st.caption('STABILIZE report not found.')
 

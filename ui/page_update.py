@@ -34,7 +34,7 @@ def page_update(ctx):
     st.caption(f"**Report Path:** `{STABILIZE_REPORT_PATH}`")
 
     if ctx.get('stabilize_connected'):
-        st.success("STABILIZE report linked to UI runtime.")
+        st.success("STABILIZE report linked (monitoring only, not overriding inference).")
         sm = ctx.get('stabilize_summary', {})
         if sm:
             c1, c2, c3 = st.columns(3)
