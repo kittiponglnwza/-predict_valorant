@@ -272,3 +272,16 @@ def render_sidebar(ctx=None):
                 <span class="nx-status-text">System Online &nbsp;·&nbsp; v9.0.1</span>
             </div>
         """, unsafe_allow_html=True)
+
+        stabilize_on = bool(ctx and ctx.get('stabilize_connected'))
+        if stabilize_on:
+            cfg = ctx.get('stabilize_settings', {})
+            t_home = cfg.get('t_home')
+            t_draw = cfg.get('t_draw')
+            st.caption('STABILIZE linked to UI runtime.')
+            if t_home is not None and t_draw is not None:
+                st.caption(f"thresholds: home={float(t_home):.3f}, draw={float(t_draw):.3f}")
+        else:
+            st.caption('STABILIZE report not found.')
+
+

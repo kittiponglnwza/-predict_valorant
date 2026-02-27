@@ -3,12 +3,15 @@ ui/page_update.py — Data Management page for Football AI Nexus Engine
 """
 import os
 import glob
+from pathlib import Path
 import streamlit as st
 import pandas as pd
 
 from src.config import DATA_DIR, MODEL_PATH
 from src.predict import update_season_csv_from_api
 from utils import silent
+
+STABILIZE_REPORT_PATH = Path(DATA_DIR).parent / "artifacts" / "reports" / "stabilize_backtest_report.json"
 
 
 def page_update(ctx):
@@ -25,6 +28,29 @@ def page_update(ctx):
             st.dataframe(df_new.head(10), use_container_width=True)
         else:
             st.error("Failed to fetch update.")
+
+    st.divider()
+    st.subheader("STABILIZE Backtest Link")
+    st.caption(f"**Report Path:** `{STABILIZE_REPORT_PATH}`")
+
+    if ctx.get('stabilize_connected'):
+        st.success("STABILIZE report linked to UI runtime.")
+        sm = ctx.get('stabilize_summary', {})
+        if sm:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Val Macro-F1", f"{sm.get('avg_val_macro_f1_after', 0):.3f}")
+            c2.metric("Holdout Macro-F1", f"{sm.get('final_holdout_macro_f1_after', 0):.3f}")
+            c3.metric("Holdout Draw Recall", f"{sm.get('final_holdout_draw_recall_after', 0):.3f}")
+    else:
+        st.warning("STABILIZE report not linked yet.")
+
+    if st.button("Run STABILIZE Backtest (2020-2025)"):
+        with st.spinner("Running rolling-origin backtest..."):
+            from pipelines.train_pipeline import main as run_stabilize_backtest
+            silent(run_stabilize_backtest)
+        st.success("STABILIZE backtest complete. Reloading UI context...")
+        st.cache_resource.clear()
+        st.rerun()
 
     st.divider()
     st.subheader("Local Datasets (`/data`)")

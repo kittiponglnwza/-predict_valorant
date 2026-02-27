@@ -5,7 +5,9 @@
 ╚══════════════════════════════════════════════════════════════╝
 """
 
+import json
 import sys, os
+from pathlib import Path
 
 _UI_DIR = os.path.dirname(os.path.abspath(__file__))
 _ROOT   = os.path.dirname(_UI_DIR)
@@ -25,6 +27,58 @@ from page_fixtures  import page_fixtures
 from page_season    import page_season
 from page_analysis  import page_analysis
 from page_update    import page_update
+
+STABILIZE_REPORT_PATH = Path(_ROOT) / "artifacts" / "reports" / "stabilize_backtest_report.json"
+
+
+def _load_stabilize_report():
+    if not STABILIZE_REPORT_PATH.exists():
+        return None
+    try:
+        return json.loads(STABILIZE_REPORT_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _bind_stabilize_to_ctx(ctx):
+    ctx['stabilize_connected'] = False
+    ctx['stabilize_report_path'] = str(STABILIZE_REPORT_PATH)
+    ctx['stabilize_summary'] = {}
+    ctx['stabilize_settings'] = {}
+
+    report = _load_stabilize_report()
+    if not report:
+        return ctx
+
+    ctx['stabilize_connected'] = True
+    ctx['stabilize_summary'] = report.get('summary', {})
+    cfg = report.get('selected_settings', {}).get('global_from_validation', {})
+    ctx['stabilize_settings'] = cfg
+
+    # Sync thresholds selected by STABILIZE report into runtime context.
+    t_home = cfg.get('t_home')
+    t_draw = cfg.get('t_draw')
+    if t_home is not None and t_draw is not None:
+        try:
+            t_home_f = float(t_home)
+            t_draw_f = float(t_draw)
+            ctx['OPT_T_HOME'] = t_home_f
+            ctx['OPT_T_DRAW'] = t_draw_f
+            ens = ctx.get('ensemble')
+            if ens is not None:
+                if hasattr(ens, 't_home'):
+                    ens.t_home = t_home_f
+                if hasattr(ens, 't_draw'):
+                    ens.t_draw = t_draw_f
+
+            # Recompute final predictions with STABILIZE thresholds so Overview metrics stay in sync.
+            proba = ctx.get('proba_hybrid')
+            if proba is not None:
+                from src.model import apply_thresholds
+                ctx['y_pred_final'] = apply_thresholds(proba, t_home_f, t_draw_f)
+        except Exception:
+            pass
+    return ctx
 
 # ── 1. Page Config ────────────────────────────────────────────
 st.set_page_config(
@@ -52,7 +106,7 @@ def load_or_train():
             feat['final_elo'], feat['final_elo_home'], feat['final_elo_away'],
         )
         ctx = _ctx_from_result(feat, mr)
-    return ctx
+    return _bind_stabilize_to_ctx(ctx)
 
 
 def _ctx_from_result(f, mr):
@@ -132,6 +186,8 @@ if 'ctx' not in st.session_state:
     st.session_state['ctx'] = load_or_train()
 
 ctx = st.session_state['ctx']
+ctx = _bind_stabilize_to_ctx(ctx)
+st.session_state['ctx'] = ctx
 
 # ── 5. Render Sidebar ────────────────────────────────────────
 render_sidebar(ctx)
@@ -148,3 +204,4 @@ pages = {
 
 active_page = st.session_state.get('nav_page', "Overview")
 pages[active_page](ctx)
+
