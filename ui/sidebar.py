@@ -72,11 +72,12 @@ def render_sidebar(ctx=None):
 
         .nx-logo-text {
             font-family: 'Orbitron', sans-serif;
-            font-size: 2rem;
+            font-size: 1.5rem;
             font-weight: 900;
             color: #F0F6FF;
             letter-spacing: 1px;
-            line-height: 1;
+            line-height: 1.2;
+            white-space: nowrap;
         }
 
         .nx-logo-text em {
@@ -286,5 +287,3 @@ def render_sidebar(ctx=None):
                 st.caption(f"report thresholds: home={float(t_home):.3f}, draw={float(t_draw):.3f}")
         else:
             st.caption('STABILIZE report not found.')
-
-

@@ -13,6 +13,8 @@ from utils import silent
 def page_overview(ctx):
     from sklearn.metrics import confusion_matrix, accuracy_score
 
+    default_logo = "https://upload.wikimedia.org/wikipedia/en/f/f2/Premier_League_Logo.svg"
+
     st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;800&family=Barlow:wght@400;500;600&display=swap');
@@ -171,6 +173,16 @@ def page_overview(ctx):
         font-size: 1.1rem; font-weight: 700;
         color: var(--text1); letter-spacing: 0.02em; flex: 1;
     }
+    .match-teams-logos {
+        display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    }
+    .match-team {
+        display: inline-flex; align-items: center; gap: 6px;
+    }
+    .match-logo {
+        width: 20px; height: 20px; object-fit: contain; flex-shrink: 0;
+        filter: drop-shadow(0 1px 4px rgba(0,0,0,0.35));
+    }
     .match-vs { color: var(--text3); font-weight: 400; margin: 0 4px; }
     .match-score {
         font-family: 'Barlow Condensed', sans-serif;
@@ -323,12 +335,16 @@ def page_overview(ctx):
                         th  = utc + timedelta(hours=7)
                         sh  = m['score']['fullTime'].get('home') or 0
                         sa  = m['score']['fullTime'].get('away') or 0
+                        home_id = m["homeTeam"].get("id")
+                        away_id = m["awayTeam"].get("id")
                         live.append({
                             "home":  m["homeTeam"].get("shortName") or m["homeTeam"]["name"],
                             "away":  m["awayTeam"].get("shortName") or m["awayTeam"]["name"],
                             "score": f"{sh}  –  {sa}",
                             "min":   m.get("minute", ""),
                             "time":  th.strftime("%H:%M"),
+                            "home_logo": m["homeTeam"].get("crest") or (f"https://crests.football-data.org/{home_id}.png" if home_id else default_logo),
+                            "away_logo": m["awayTeam"].get("crest") or (f"https://crests.football-data.org/{away_id}.png" if away_id else default_logo),
                         })
                 r2 = _req.get("https://api.football-data.org/v4/competitions/PL/matches",
                               headers=headers, params={"status": "SCHEDULED"}, timeout=8)
@@ -337,11 +353,15 @@ def page_overview(ctx):
                                     key=lambda x: x["utcDate"])[:6]:
                         utc = datetime.fromisoformat(m["utcDate"].replace("Z", "+00:00"))
                         th  = utc + timedelta(hours=7)
+                        home_id = m["homeTeam"].get("id")
+                        away_id = m["awayTeam"].get("id")
                         upcoming.append({
                             "home": m["homeTeam"].get("shortName") or m["homeTeam"]["name"],
                             "away": m["awayTeam"].get("shortName") or m["awayTeam"]["name"],
                             "date": th.strftime("%d %b"),
                             "time": th.strftime("%H:%M"),
+                            "home_logo": m["homeTeam"].get("crest") or (f"https://crests.football-data.org/{home_id}.png" if home_id else default_logo),
+                            "away_logo": m["awayTeam"].get("crest") or (f"https://crests.football-data.org/{away_id}.png" if away_id else default_logo),
                         })
             except Exception:
                 pass
@@ -355,8 +375,16 @@ def page_overview(ctx):
                 st.markdown(f"""
                 <div class="match-block live">
                     <span class="match-badge badge-live">LIVE {m['min']}'</span>
-                    <div class="match-teams">
-                        {m['home']} <span class="match-vs">vs</span> {m['away']}
+                    <div class="match-teams match-teams-logos">
+                        <span class="match-team">
+                            <img class="match-logo" src="{m.get('home_logo', default_logo)}" onerror="this.src='{default_logo}'"/>
+                            {m['home']}
+                        </span>
+                        <span class="match-vs">vs</span>
+                        <span class="match-team">
+                            <img class="match-logo" src="{m.get('away_logo', default_logo)}" onerror="this.src='{default_logo}'"/>
+                            {m['away']}
+                        </span>
                     </div>
                     <div class="match-score">{m['score']}</div>
                 </div>
@@ -373,8 +401,16 @@ def page_overview(ctx):
                 st.markdown(f"""
                 <div class="match-block upcoming">
                     <span class="match-badge badge-sched">{m['date']}</span>
-                    <div class="match-teams">
-                        {m['home']} <span class="match-vs">vs</span> {m['away']}
+                    <div class="match-teams match-teams-logos">
+                        <span class="match-team">
+                            <img class="match-logo" src="{m.get('home_logo', default_logo)}" onerror="this.src='{default_logo}'"/>
+                            {m['home']}
+                        </span>
+                        <span class="match-vs">vs</span>
+                        <span class="match-team">
+                            <img class="match-logo" src="{m.get('away_logo', default_logo)}" onerror="this.src='{default_logo}'"/>
+                            {m['away']}
+                        </span>
                     </div>
                     <div class="match-time">{m['time']}</div>
                 </div>

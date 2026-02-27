@@ -882,11 +882,24 @@ def show_next_pl_fixtures(ctx, num_matches=5):
         for i, m in enumerate(matches, 1):
             home   = normalize_team_name(m["homeTeam"]["name"])
             away   = normalize_team_name(m["awayTeam"]["name"])
+            home_id = m["homeTeam"].get("id")
+            away_id = m["awayTeam"].get("id")
+            home_logo = m["homeTeam"].get("crest") or (f"https://crests.football-data.org/{home_id}.png" if home_id else None)
+            away_logo = m["awayTeam"].get("crest") or (f"https://crests.football-data.org/{away_id}.png" if away_id else None)
             utc_dt = datetime.fromisoformat(m["utcDate"].replace("Z", "+00:00"))
             th_dt  = utc_dt + timedelta(hours=7)
             ds, ts = th_dt.strftime("%d/%m/%Y"), th_dt.strftime("%H:%M")
             print(f"  {i:<5} {ds:<14} {ts:<11} {home:<22} {away}")
-            upcoming.append({"HomeTeam": home, "AwayTeam": away, "Date": ds, "Time": ts})
+            upcoming.append({
+                "HomeTeam": home,
+                "AwayTeam": away,
+                "Date": ds,
+                "Time": ts,
+                "HomeID": home_id,
+                "AwayID": away_id,
+                "HomeLogo": home_logo,
+                "AwayLogo": away_logo,
+            })
 
         from src.config import NEW_TEAMS_BOOTSTRAPPED
         teams_ok = set(match_df_clean["HomeTeam"].tolist() + match_df_clean["AwayTeam"].tolist()) | set(NEW_TEAMS_BOOTSTRAPPED.keys())

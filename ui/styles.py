@@ -88,6 +88,14 @@ def inject_global_css():
     [data-testid="stSidebar"] {
         background-color: #0E131F !important;
         border-right: 1px solid #1F2937;
+        transform: translateX(0) !important;
+        min-width: 244px !important;
+        width: 244px !important;
+    }
+
+    /* Hide collapse sidebar button (<<) */
+    [data-testid="stSidebarCollapseButton"] {
+        display: none !important;
     }
     
     h1, h2, h3 {

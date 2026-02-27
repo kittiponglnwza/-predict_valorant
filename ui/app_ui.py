@@ -90,6 +90,20 @@ st.set_page_config(
 # ── 2. Global CSS ─────────────────────────────────────────────
 inject_global_css()
 
+# Force sidebar always visible
+st.markdown(
+    """<style>
+    section[data-testid="stSidebar"] {
+        transform: translateX(0) !important;
+        visibility: visible !important;
+        display: block !important;
+        margin-left: 0 !important;
+        left: 0 !important;
+    }
+    </style>""",
+    unsafe_allow_html=True,
+)
+
 
 # ── 3. Load / Train model ─────────────────────────────────────
 @st.cache_resource(show_spinner="⚙️ กำลังเร่งเครื่องยนต์ AI...")
@@ -244,4 +258,3 @@ pages = {
 
 active_page = st.session_state.get('nav_page', "Overview")
 pages[active_page](ctx)
-
