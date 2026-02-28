@@ -21,7 +21,11 @@ _GF = (
 _CSS = """<style>
 @import url('https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@600;700&display=swap');
 
-.main .block-container { padding-top:1.5rem; max-width:1100px; }
+.main .block-container { padding-top:2rem; max-width:1100px; }
+
+/* Fix stTabs overflow */
+.stTabs [data-baseweb="tab-list"] { flex-wrap:nowrap; overflow-x:auto; }
+
 
 /* Header */
 .pg-eyebrow {
@@ -48,8 +52,9 @@ _CSS = """<style>
     font-weight:700 !important; letter-spacing:2.5px !important;
     text-transform:uppercase !important; color:rgba(148,187,233,.38) !important;
     background:transparent !important; border:none !important;
-    border-radius:0 !important; padding:14px 28px !important;
+    border-radius:0 !important; padding:12px 20px !important;
     border-bottom:3px solid transparent !important;
+    white-space:nowrap !important;
 }
 .stTabs [aria-selected="true"] {
     color:#F0F6FF !important;
@@ -57,7 +62,7 @@ _CSS = """<style>
 }
 
 /* Section divider */
-.div-wrap { display:flex; align-items:center; gap:16px; margin:32px 0 20px; }
+.div-wrap { display:flex; align-items:center; gap:16px; margin:36px 0 24px; }
 .div-line  { flex:1; height:1px; background:rgba(255,255,255,.06); }
 .div-label {
     font-family:'DM Sans',sans-serif; font-size:.72rem; font-weight:700;
@@ -69,15 +74,15 @@ _CSS = """<style>
 .doc-card {
     background:rgba(255,255,255,.03);
     border:1px solid rgba(255,255,255,.08);
-    border-radius:14px; padding:24px 28px; margin-bottom:16px;
+    border-radius:14px; padding:28px 32px; margin-bottom:20px;
 }
 .doc-card-title {
-    font-family:'Syne',sans-serif; font-size:1.2rem; font-weight:800;
-    color:#F0F6FF; margin-bottom:8px;
+    font-family:'Syne',sans-serif; font-size:1.15rem; font-weight:800;
+    color:#F0F6FF; margin-bottom:12px;
 }
 .doc-card-body {
     font-family:'DM Sans',sans-serif; font-size:.95rem;
-    color:rgba(148,187,233,.7); line-height:1.75;
+    color:rgba(148,187,233,.7); line-height:1.85;
 }
 
 /* Tag pills */
@@ -140,7 +145,7 @@ def _tab_system():
     st.write("")
 
     _card(
-        "🏗️ ภาพรวมระบบ (System Architecture)",
+        "ภาพรวมระบบ (System Architecture)",
         """
         <b>Football AI Nexus Engine</b> เป็น Web Application ที่พัฒนาด้วย <b>Streamlit</b>
         ทำหน้าที่รวบรวมข้อมูลผลการแข่งขัน Premier League แบบ Real-time
@@ -176,11 +181,11 @@ def _tab_system():
 
     flow_html = (
         f'<html><head><style>{_GF}*{{margin:0;padding:0;box-sizing:border-box;}}'
-        f'html,body{{background:#060F1C;overflow:hidden;width:100%;}}</style></head><body>'
+        f'html,body{{background:#060F1C;overflow:visible;width:100%;}}</style></head><body>'
         f'<div style="background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.08);'
         f'border-radius:14px;padding:24px 28px;">{"".join(parts)}</div></body></html>'
     )
-    components.html(flow_html, height=len(steps) * 68 + 48, scrolling=False)
+    components.html(flow_html, height=len(steps) * 78 + 48, scrolling=False)
 
     _divider("Tech Stack")
     tags = [
@@ -203,7 +208,7 @@ def _tab_dataset():
     st.write("")
 
     _card(
-        "📦 Dataset",
+        "Dataset",
         """
         <b>แหล่งที่มา:</b> football-data.org API (ดาวน์โหลดอัตโนมัติผ่านระบบ)<br><br>
         <b>ขอบเขต:</b> Premier League ฤดูกาล 2020/21 – 2025/26<br>
@@ -259,7 +264,7 @@ def _tab_dataset():
 
     _divider("การเตรียมข้อมูล (Preprocessing)")
     _card(
-        "🔧 Preprocessing Pipeline",
+        "Preprocessing Pipeline",
         """
         1. <b>Drop duplicates</b> — ตัด match ซ้ำออกด้วย Date+HomeTeam+AwayTeam<br>
         2. <b>Handle missing values</b> — forward-fill สำหรับ odds, ใช้ league average สำหรับ xG<br>
@@ -278,7 +283,7 @@ def _tab_model():
     st.write("")
 
     _card(
-        "🤖 โมเดลที่ 1 — ML Ensemble (VotingClassifier)",
+        "โมเดลที่ 1 — ML Ensemble (VotingClassifier)",
         """
         ประกอบด้วย 3 base models รวมกันแบบ <b>Soft Voting</b>:<br><br>
         <b>① XGBoost Classifier</b> — tree-based gradient boosting
@@ -294,7 +299,7 @@ def _tab_model():
     )
 
     _card(
-        "🧠 โมเดลที่ 2 — Neural Network (STABILIZE)",
+        "โมเดลที่ 2 — Neural Network (STABILIZE)",
         """
         โครงสร้าง <b>Feedforward Neural Network</b> ออกแบบเองให้เหมาะกับ Dataset:<br><br>
         <b>Input layer</b> — รับ feature vector ทั้งหมด<br>
@@ -345,7 +350,7 @@ def _tab_model():
 
     table_html = (
         f'<html><head><style>{_GF}*{{margin:0;padding:0;box-sizing:border-box;}}'
-        f'html,body{{background:#060F1C;overflow:hidden;width:100%;}}'
+        f'html,body{{background:#060F1C;overflow:visible;width:100%;}}'
         f'table{{width:100%;border-collapse:collapse;}}</style></head><body>'
         f'<div style="background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.08);'
         f'border-radius:14px;overflow:hidden;">'
@@ -360,7 +365,7 @@ def _tab_model():
         f'<tbody>{rows_html}</tbody>'
         f'</table></div></body></html>'
     )
-    components.html(table_html, height=50 + len(compare_rows) * 50 + 20, scrolling=False)
+    components.html(table_html, height=50 + len(compare_rows) * 52 + 16, scrolling=False)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -380,7 +385,7 @@ def _tab_results(ctx):
         st.write("")
 
     _card(
-        "📊 ผลลัพธ์โมเดล (Expected Performance)",
+        "ผลลัพธ์โมเดล (Expected Performance)",
         """
         จากการทดสอบแบบ <b>Rolling-origin backtest</b> (walk-forward 2020–2025):<br><br>
         • <b>Overall Accuracy:</b> ~54–56% (baseline random = 33%)<br>
@@ -394,7 +399,7 @@ def _tab_results(ctx):
     )
 
     _card(
-        "⚠️ ข้อจำกัด (Limitations)",
+        "ข้อจำกัด (Limitations)",
         """
         • <b>Draw prediction</b> — ทำนายยากที่สุดในฟุตบอล F1 ~0.38<br>
         • <b>Injury/Suspension data</b> — ไม่มีข้อมูล lineup จริง<br>
@@ -406,7 +411,7 @@ def _tab_results(ctx):
     )
 
     _card(
-        "🔗 แหล่งอ้างอิง",
+        "แหล่งอ้างอิง",
         """
         • <a href="https://www.football-data.org/" style="color:#38BDF8;">football-data.org</a> — Football match data API<br>
         • <a href="https://scikit-learn.org/" style="color:#38BDF8;">scikit-learn</a> — ML library (VotingClassifier, RandomForest, LogisticRegression)<br>
@@ -426,17 +431,17 @@ def page_docs(ctx=None):
 
     st.markdown("""
         <div style="margin-bottom:32px;">
-            <div class="pg-eyebrow">⚡ Nexus Engine · Documentation</div>
+            <div class="pg-eyebrow">Nexus Engine · Documentation</div>
             <div class="pg-title">Project <em>Docs</em></div>
             <div class="pg-sub">โครงสร้างระบบ · Dataset · โมเดล ML · ผลลัพธ์และแหล่งอ้างอิง</div>
         </div>
     """, unsafe_allow_html=True)
 
     tab1, tab2, tab3, tab4 = st.tabs([
-        "  🏗️ System  ",
-        "  📦 Dataset  ",
-        "  🤖 Model  ",
-        "  📊 Results  ",
+        "  System  ",
+        "  Dataset  ",
+        "  Model  ",
+        "  Results  ",
     ])
 
     with tab1:
