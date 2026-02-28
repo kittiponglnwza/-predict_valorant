@@ -65,7 +65,7 @@ def tune_lgbm_optuna(X_tr, y_tr, n_trials=40, timeout=120):
             'n_estimators':      trial.suggest_int('n_estimators', 100, 500),
             'learning_rate':     trial.suggest_float('learning_rate', 0.005, 0.1, log=True),
             'num_leaves':        trial.suggest_int('num_leaves', 15, 63),
-            'max_depth':         trial.suggest_int('max_depth', 3, 7),
+            'max_depth':         trial.suggest_int('max_depth', 3, 10),
             'min_child_samples': trial.suggest_int('min_child_samples', 10, 50),
             'subsample':         trial.suggest_float('subsample', 0.6, 1.0),
             'colsample_bytree':  trial.suggest_float('colsample_bytree', 0.6, 1.0),
@@ -276,7 +276,9 @@ def build_poisson_proba_for_test(test_df, poisson_features, poisson_scaler,
 def blend_ml_poisson_dynamic(ml_proba, poisson_proba, elo_diffs, base_alpha=0.5):
     elo_diffs    = np.array(elo_diffs)
     elo_norm     = np.clip(elo_diffs / 400.0, 0, 1)
-    dynamic_alpha = np.clip(base_alpha - 0.2 + 0.4 * elo_norm, 0.1, 0.9)
+    # Force higher ML weight: base starts at 0.7 → Poisson influence capped ~30%
+    effective_base = max(base_alpha, 0.7)
+    dynamic_alpha = np.clip(effective_base - 0.2 + 0.4 * elo_norm, 0.1, 0.9)
     blended = np.zeros_like(ml_proba, dtype=float)
     for i in range(ml_proba.shape[0]):
         blended[i] = dynamic_alpha[i] * ml_proba[i] + (1 - dynamic_alpha[i]) * poisson_proba[i]
@@ -586,10 +588,10 @@ def run_training_pipeline(match_df_clean, FEATURES, home_stats, away_stats,
 
     OPT_T_HOME, OPT_T_DRAW, best_macro_f1 = optimize_thresholds(
         proba_hybrid, y_test,
-        t_draw_range=(0.12, 0.40), t_home_range=(0.30, 0.65),
-        objective='accuracy')
+        t_draw_range=(0.08, 0.35), t_home_range=(0.30, 0.65),
+        objective='macro_f1')
     print(f"  Optimal t_home={OPT_T_HOME:.3f}  t_draw={OPT_T_DRAW:.3f}")
-    print(f"  Best threshold objective (accuracy) = {best_macro_f1:.4f}")
+    print(f"  Best threshold objective (macro_f1) = {best_macro_f1:.4f}")
 
     # Draw calibration check
     _draw_pred_mean = proba_hybrid[:, 1].mean()
@@ -693,4 +695,3 @@ def run_training_pipeline(match_df_clean, FEATURES, home_stats, away_stats,
         'poisson_features_used': poisson_features_used,
         'best_lgbm_params':     best_lgbm_params,
     }
-

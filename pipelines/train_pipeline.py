@@ -27,11 +27,11 @@ from src.training.trainer import (
 
 
 REPORT_PATH = Path("artifacts/reports/stabilize_backtest_report.json")
-SELECTION_METRIC = os.getenv("STABILIZE_SELECTION_METRIC", "accuracy").strip().lower()
+SELECTION_METRIC = os.getenv("STABILIZE_SELECTION_METRIC", "macro_f1").strip().lower()
 MIN_RECALL_POLICY = {
-    0: float(os.getenv("STABILIZE_MIN_RECALL_AWAY", "0.08")),
-    1: float(os.getenv("STABILIZE_MIN_RECALL_DRAW", "0.10")),
-    2: float(os.getenv("STABILIZE_MIN_RECALL_HOME", "0.08")),
+    0: float(os.getenv("STABILIZE_MIN_RECALL_AWAY", "0.10")),
+    1: float(os.getenv("STABILIZE_MIN_RECALL_DRAW", "0.08")),
+    2: float(os.getenv("STABILIZE_MIN_RECALL_HOME", "0.15")),
 }
 RECOMMENDED_MIN_SEASONS = int(os.getenv("MIN_RECOMMENDED_SEASONS", "8"))
 
@@ -179,8 +179,8 @@ def _build_global_thresholds(
     t_home, t_draw, tuned_score = optimize_thresholds(
         proba_all,
         y_all,
-        t_home_range=(0.35, 0.65),
-        t_draw_range=(0.12, 0.45),
+        t_home_range=(0.30, 0.65),
+        t_draw_range=(0.08, 0.35),
         min_recall=min_recall,
         objective=selection_metric,
     )
@@ -436,7 +436,7 @@ def main():
 
     selected_name = max(
         profiles.keys(),
-        key=lambda name: float(profiles[name]["summary"]["avg_val_accuracy_after"]),
+        key=lambda name: float(profiles[name]["summary"]["avg_val_macro_f1_after"]),
     )
     selected = profiles[selected_name]
 

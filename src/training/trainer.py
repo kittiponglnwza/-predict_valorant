@@ -379,7 +379,8 @@ def _default_min_recall(selection_metric: str) -> dict[int, float]:
     if selection_metric == "accuracy":
         # Accuracy-first but still protect class-collapse.
         return {0: 0.08, 1: 0.10, 2: 0.08}
-    return {0: 0.15, 2: 0.20}
+    # macro_f1: ผ่อนผัน draw น้อยลง เพื่อให้ threshold กว้างกว่า
+    return {0: 0.10, 1: 0.08, 2: 0.15}
 
 
 def run_baseline_fold(
@@ -422,7 +423,7 @@ def tune_fold_on_val(
     labels: tuple[int, ...] = (0, 1, 2),
     draw_weight_candidates: tuple[float, ...] = (1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0),
     use_sigmoid_options: tuple[bool, ...] = (True, False),
-    selection_metric: str = "accuracy",
+    selection_metric: str = "macro_f1",
     min_recall: dict[int, float] | None = None,
 ) -> dict[str, Any]:
     x_train_sc, y_train, x_eval_sc, y_eval = _prepare_xy(train_df, eval_df, features, target_col)
@@ -449,8 +450,8 @@ def tune_fold_on_val(
                 t_home, t_draw, tuned_primary = optimize_thresholds(
                     proba=proba,
                     y_true=y_eval,
-                    t_home_range=(0.35, 0.65),
-                    t_draw_range=(0.12, 0.45),
+                    t_home_range=(0.30, 0.65),
+                    t_draw_range=(0.08, 0.35),
                     min_recall=recall_constraints,
                     objective=selection_metric,
                 )
