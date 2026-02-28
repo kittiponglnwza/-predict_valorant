@@ -886,9 +886,20 @@ def show_next_pl_fixtures(ctx, num_matches=5):
     url     = "https://api.football-data.org/v4/competitions/PL/matches"
     headers = {"X-Auth-Token": API_KEY}
     try:
-        r = requests.get(url, headers=headers, params={"status": "SCHEDULED"}, timeout=10)
+        from datetime import timezone
+        today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        now_utc   = datetime.now(timezone.utc)
+        r = requests.get(url, headers=headers, params={
+            "status": "SCHEDULED",
+            "dateFrom": today_utc,
+        }, timeout=10)
         r.raise_for_status()
         matches = r.json().get("matches", [])
+        # กรองเฉพาะที่ utcDate >= ตอนนี้จริงๆ ป้องกัน edge case
+        matches = [
+            m for m in matches
+            if datetime.fromisoformat(m["utcDate"].replace("Z", "+00:00")) >= now_utc
+        ]
         matches = sorted(matches, key=lambda x: x["utcDate"])[:num_matches]
         if not matches:
             print("  ⚠️  ไม่พบแมตช์"); return
