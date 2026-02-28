@@ -186,12 +186,12 @@ def _build_global_thresholds(
     proba_all = np.vstack(pooled_proba)
     y_all = np.concatenate(pooled_true)
 
-    # [STEP 4+FIX] t_draw floor=0.26 สอดคล้องกับ tune_fold — ป้องกัน draw_recall=0
+    # global threshold search — range เดียวกับ tune_fold
     t_home, t_draw, tuned_score = optimize_thresholds(
         proba_all,
         y_all,
-        t_home_range=(0.32, 0.65),   # home floor=0.32
-        t_draw_range=(0.26, 0.40),   # draw floor=0.26 (ลดจาก 0.30 ที่ทำ draw=0)
+        t_home_range=(0.33, 0.60),
+        t_draw_range=(0.20, 0.40),
         min_recall=min_recall,
         objective=selection_metric,
     )

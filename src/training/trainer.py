@@ -78,26 +78,23 @@ def align_proba_to_labels(
 
 def apply_thresholds(proba: np.ndarray, t_home: float, t_draw: float) -> np.ndarray:
     """
-    [STEP 2] Symmetric decision rule — ไม่ให้ Away เป็น default fallback
-    Logic:
-      1. p_home >= t_home → Home
-      2. p_away >= t_home → Away  (symmetric threshold, ไม่ใช้ค่าต่างกัน)
-      3. p_draw >= t_draw → Draw  (check หลังสุด: predict draw เฉพาะเมื่อ confident)
-      4. else             → argmax (ไม่มี away-bias)
+    Draw-first decision rule (original logic — proven stable):
+      1. p_draw >= t_draw → Draw
+      2. p_home >= t_home → Home
+      3. else             → Away
+    Away-default ทำให้ Away recall สูงตามธรรมชาติของข้อมูล (Away จริงๆ มักมี proba สูง)
+    Symmetric rule พัง holdout เพราะ t_home สูงเกิน → Home=0.12, Away ครอง
     """
-    proba = np.asarray(proba)
-    preds = np.empty(len(proba), dtype=int)
-    for i, row in enumerate(proba):
+    preds = []
+    for row in proba:
         p_away, p_draw, p_home = float(row[0]), float(row[1]), float(row[2])
-        if p_home >= t_home:
-            preds[i] = 2
-        elif p_away >= t_home:
-            preds[i] = 0
-        elif p_draw >= t_draw:
-            preds[i] = 1
+        if p_draw >= t_draw:
+            preds.append(1)
+        elif p_home >= t_home:
+            preds.append(2)
         else:
-            preds[i] = int(np.argmax(row))
-    return preds
+            preds.append(0)
+    return np.asarray(preds, dtype=int)
 
 
 def optimize_thresholds(
@@ -448,20 +445,17 @@ def tune_fold_on_val(
     features,
     target_col: str = "Result3",
     labels: tuple[int, ...] = (0, 1, 2),
-    # [FIX] draw_weight ต้องสูงพอที่ softmax output draw proba เป็น max บ้าง
-    # draw_weight=1.0 ทำให้ draw proba ต่ำกว่า home/away เสมอ → argmax ไม่ช่วย
-    # ค่า 1.5–2.5 ทำให้ model "เห็น" draw มากพอ แต่ไม่ overfit
-    draw_weight_candidates: tuple[float, ...] = (1.5, 2.0, 2.5),
+    # draw_weight search ช่วง original — optimizer เลือกเองว่าค่าไหน balance ดีที่สุด
+    draw_weight_candidates: tuple[float, ...] = (1.0, 1.5, 2.0, 2.5, 3.0),
     use_sigmoid_options: tuple[bool, ...] = (True, False),
     selection_metric: str = "macro_f1",
     # [STEP 1] min_recall=None — accuracy-only mode ไม่บังคับ class constraint
     min_recall: dict[int, float] | None = None,
 ) -> dict[str, Any]:
     x_train_sc, y_train, x_eval_sc, y_eval = _prepare_xy(train_df, eval_df, features, target_col)
-    # [FIX] บังคับ draw_recall ≥ 0.05 — ป้องกัน model predict draw=0 ตลอด
-    # constraint เล็กน้อยนี้บังคับ optimizer ให้หา threshold ที่ predict draw บ้าง
-    # ถ้า accuracy ลดแค่ 0.001–0.002 แต่ได้ draw prediction กลับมา = worth it
-    recall_constraints: dict[int, float] = {1: 0.05}
+    # recall constraint ที่ balanced: away=0.15, draw=0.08, home=0.20
+    # ป้องกัน class collapse โดยไม่ restrict accuracy มากเกิน
+    recall_constraints: dict[int, float] = {0: 0.15, 1: 0.08, 2: 0.20}
 
     best: dict[str, Any] | None = None
     trial_rows: list[dict[str, Any]] = []
@@ -484,11 +478,9 @@ def tune_fold_on_val(
                 t_home, t_draw, tuned_primary = optimize_thresholds(
                     proba=proba,
                     y_true=y_eval,
-                    # [STEP 2] t_home symmetric — ค้นหา threshold ที่ดีที่สุด
-                    # t_home ใช้กับทั้ง Home และ Away (symmetric decision rule)
-                    # t_draw สำหรับ Draw เท่านั้น (argmax fallback ช่วย)
-                    t_home_range=(0.33, 0.58),
-                    t_draw_range=(0.26, 0.45),
+                    # threshold search ใกล้ original — proven range จาก run แรก
+                    t_home_range=(0.33, 0.60),
+                    t_draw_range=(0.20, 0.40),
                     min_recall=recall_constraints,
                     objective="accuracy",
                 )
