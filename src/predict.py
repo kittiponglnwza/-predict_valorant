@@ -286,6 +286,25 @@ def build_match_row(home_team, away_team, ctx, match_date=None):
     row['Late_season_draw'] = int(season_phase == 3) * min(home_draw_rate + 0.1, 1.0)
     row['Combined_GF_ewm']= h['GF_ewm'] + a['GF_ewm']
 
+    # ── Market features — ใช้ Elo-implied prob แทน odds จริง (ไม่มี odds อนาคต) ──
+    h_elo_prob = 1 / (1 + 10 ** ((a_elo - h_elo) / 400))
+    a_elo_prob = 1 / (1 + 10 ** ((h_elo - a_elo) / 400))
+    d_elo_prob = max(0.0, 1.0 - h_elo_prob - (a_elo_prob * 0.85))
+    _total = h_elo_prob + d_elo_prob + (a_elo_prob * 0.85)
+    if _total > 0:
+        mkt_h = h_elo_prob / _total
+        mkt_d = d_elo_prob / _total
+        mkt_a = (a_elo_prob * 0.85) / _total
+    else:
+        mkt_h, mkt_d, mkt_a = 0.45, 0.25, 0.30
+
+    row['Mkt_ImpH']     = mkt_h
+    row['Mkt_ImpD']     = mkt_d
+    row['Mkt_ImpA']     = mkt_a
+    row['Mkt_Spread']   = mkt_h - mkt_a
+    row['Mkt_DrawPrem'] = mkt_d - (mkt_h * 0.5 + mkt_a * 0.5)
+    row['Mkt_Overround']= 0.05
+
     return row
 
 

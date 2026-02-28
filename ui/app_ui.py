@@ -135,6 +135,17 @@ def load_or_train():
             feat['final_elo'], feat['final_elo_home'], feat['final_elo_away'],
         )
         ctx = _ctx_from_result(feat, mr)
+    # ── Build remaining_fixtures + final_table for Monte Carlo ──
+    try:
+        from src.predict import run_season_simulation
+        if not ctx.get('remaining_fixtures'):
+            updated_ctx = run_season_simulation(ctx)  # returns ctx directly
+            if updated_ctx:
+                ctx = updated_ctx
+    except Exception as _e:
+        pass
+    ctx.setdefault('remaining_fixtures', [])
+    ctx.setdefault('final_table', None)
     return _bind_stabilize_to_ctx(ctx)
 
 
@@ -168,6 +179,8 @@ def _ctx_from_result(f, mr):
         'away_poisson_model': mr['away_poisson_model'],
         'poisson_scaler': mr['poisson_scaler'],
         'poisson_features_used': mr['poisson_features_used'],
+        'remaining_fixtures': mr.get('remaining_fixtures', []),
+        'final_table': mr.get('final_table', None),
     }
 
 
@@ -241,6 +254,8 @@ def _ctx_from_bundle(f, b):
         'away_poisson_model': b.get('poisson_model_away'),
         'poisson_scaler': b.get('poisson_scaler'),
         'poisson_features_used': b.get('poisson_features', []),
+        'remaining_fixtures': b.get('remaining_fixtures', []),
+        'final_table': b.get('final_table', None),
     }
 
 

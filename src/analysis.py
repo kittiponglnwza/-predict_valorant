@@ -41,8 +41,11 @@ def run_monte_carlo(ctx, n_simulations=1000, verbose=True):
         row = build_match_row(match['HomeTeam'], match['AwayTeam'], ctx)
         future_rows.append(row)
 
-    future_df    = pd.DataFrame(future_rows)
-    X_future_sc  = scaler.transform(future_df[FEATURES])
+    future_df = pd.DataFrame(future_rows)
+    # ── Guard: reindex ให้ตรง FEATURES เสมอ เติม 0 ถ้าขาด ──
+    future_df = future_df.reindex(columns=FEATURES, fill_value=0).fillna(0)
+
+    X_future_sc  = scaler.transform(future_df)
     proba_matrix = ensemble.predict_proba(X_future_sc)
 
     all_teams = list(final_table.index)
