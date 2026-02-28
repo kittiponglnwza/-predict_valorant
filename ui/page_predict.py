@@ -276,6 +276,9 @@ def page_predict(ctx):
     if default_h not in all_teams: default_h = all_teams[0]
     if default_a not in all_teams: default_a = all_teams[1]
 
+    # ── ใช้ widget_key ที่เปลี่ยนตาม pred_home/pred_away เพื่อ force reset dropdown ──
+    widget_key_suffix = f"{default_h}_{default_a}"
+
     # ── Dropdowns ────────────────────────────────────────────────
     col_h, col_vs, col_a = st.columns([5, 1, 5], gap="small")
 
@@ -284,7 +287,8 @@ def page_predict(ctx):
                     unsafe_allow_html=True)
         home = st.selectbox("home_team", all_teams,
                             index=all_teams.index(default_h),
-                            label_visibility="collapsed", key="sel_home")
+                            label_visibility="collapsed",
+                            key=f"sel_home_{widget_key_suffix}")
         st.session_state['pred_home'] = home
 
     with col_vs:
@@ -299,7 +303,8 @@ def page_predict(ctx):
         away_opts = [t for t in all_teams if t != home]
         idx_a = away_opts.index(default_a) if default_a in away_opts else 0
         away = st.selectbox("away_team", away_opts, index=idx_a,
-                            label_visibility="collapsed", key="sel_away")
+                            label_visibility="collapsed",
+                            key=f"sel_away_{widget_key_suffix}")
         st.session_state['pred_away'] = away
 
     # ── VS Banner ────────────────────────────────────────────────

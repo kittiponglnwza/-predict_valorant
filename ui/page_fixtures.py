@@ -433,6 +433,34 @@ _CSS = """<style>
     letter-spacing: 1px; text-transform: uppercase;
     white-space: nowrap;
 }
+
+/* ── History sections ── */
+.hst-section-label {
+    font-family: 'Rajdhani', sans-serif;
+    font-size: 0.65rem; font-weight: 700;
+    letter-spacing: 3px; text-transform: uppercase;
+    color: rgba(148,187,233,0.35);
+    padding: 0 4px 10px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    margin-bottom: 8px;
+}
+.hst-untracked-row {
+    display: grid;
+    grid-template-columns: 72px 1fr 28px 1fr 76px 76px 96px 72px;
+    align-items: center;
+    gap: 0 10px;
+    background: rgba(255,255,255,0.015);
+    border: 1px solid rgba(255,255,255,0.05);
+    border-radius: 9px;
+    padding: 11px 22px;
+    margin-bottom: 5px;
+}
+
+.hst-empty-note {
+    font-family: 'Rajdhani', sans-serif;
+    font-size: 0.78rem; color: rgba(148,187,233,0.28);
+    letter-spacing: 1px; padding: 12px 4px;
+}
 .hst-correct { background:rgba(0,230,118,0.10); border:1px solid rgba(0,230,118,0.28); color:#00E676; }
 .hst-wrong   { background:rgba(239,68,68,0.09); border:1px solid rgba(239,68,68,0.22); color:#EF4444; }
 .hst-pending { background:rgba(148,187,233,0.05); border:1px solid rgba(148,187,233,0.13); color:rgba(148,187,233,0.38); }
@@ -553,14 +581,6 @@ def page_fixtures(ctx):
                     except Exception:
                         date_label = raw_date
 
-                    # Auto-save ทุกแมตช์
-                    _add_prediction(
-                        f["HomeTeam"], f["AwayTeam"],
-                        f.get("Date", ""), f.get("Time", ""),
-                        score, h_prob, d_prob, a_prob,
-                        f.get("MatchID"),
-                    )
-
                     st.markdown(f"""
                     <div class="fxc-row">
                         <div class="fxc-date">{date_label}</div>
@@ -587,8 +607,11 @@ def page_fixtures(ctx):
                     """, unsafe_allow_html=True)
                     st.button("Analyse", key=f"fx_nav_{i}",
                               use_container_width=True,
-                              on_click=_navigate_to_predict,
-                              args=(f["HomeTeam"], f["AwayTeam"]))
+                              on_click=_save_and_predict,
+                              args=(f["HomeTeam"], f["AwayTeam"],
+                                    f.get("Date",""), f.get("Time",""),
+                                    score, h_prob, d_prob, a_prob,
+                                    f.get("MatchID")))
 
         elif upcoming is not None:
             st.markdown('<div class="fx-error">Unable to fetch upcoming fixtures. Check your API connection.</div>', unsafe_allow_html=True)
@@ -598,45 +621,98 @@ def page_fixtures(ctx):
     # ══════════════════════════════════════════════════════════════════════════
     with tab_hist:
         st.markdown("")
-        with st.spinner("Checking for real scores..."):
-            history = _fetch_real_scores()
 
-        if not history:
-            st.markdown("""
-                <div style="text-align:center;padding:3rem 0;font-family:'Rajdhani',sans-serif;
-                     font-size:1rem;color:rgba(148,187,233,0.35);letter-spacing:2px;">
-                    NO PREDICTIONS SAVED YET<br>
-                    <span style="font-size:0.8rem;opacity:0.6;">
-                        Press "Save & Predict" on any fixture to start tracking
-                    </span>
+        def _fetch_finished_matches_for_results():
+            """ดึง FINISHED matches 60 วันย้อนหลัง เพื่อเอาผลจริง"""
+            try:
+                import requests as _rq
+                from src.config import TEAM_NAME_MAP
+                _from_d = (datetime.now(timezone.utc) - timedelta(days=60)).strftime("%Y-%m-%d")
+                _r = _rq.get(
+                    "https://api.football-data.org/v4/competitions/PL/matches",
+                    headers={"X-Auth-Token": API_KEY},
+                    params={"status": "FINISHED", "dateFrom": _from_d},
+                    timeout=10,
+                )
+                if not _r.ok:
+                    return []
+                _out = []
+                for _m in _r.json().get("matches", []):
+                    _utc = datetime.fromisoformat(_m["utcDate"].replace("Z", "+00:00"))
+                    _th  = _utc + timedelta(hours=7)
+                    _ft  = _m.get("score", {}).get("fullTime", {})
+                    _out.append({
+                        "home": TEAM_NAME_MAP.get(_m["homeTeam"]["name"], _m["homeTeam"]["name"]),
+                        "away": TEAM_NAME_MAP.get(_m["awayTeam"]["name"], _m["awayTeam"]["name"]),
+                        "date": _th.strftime("%d/%m/%Y"),
+                        "real_score": f"{_ft.get('home','?')}-{_ft.get('away','?')}",
+                    })
+                return _out
+            except Exception:
+                return []
+
+        with st.spinner("Loading predictions..."):
+            history      = _fetch_real_scores()
+            finished_api = _fetch_finished_matches_for_results()
+
+        hist_all = sorted(history, key=lambda x: x.get("saved_at",""), reverse=True) if history else []
+
+        # helper
+        def _fmt_date(d):
+            try:
+                return datetime.strptime(d, "%d/%m/%Y").strftime("%d %b").upper()
+            except Exception:
+                return d
+
+        # แยก history เป็น upcoming (ยังไม่มีผล) vs finished (มีผลแล้ว)
+        now_utc = datetime.now(timezone.utc)
+
+        def _is_past(date_str, time_str="00:00"):
+            try:
+                dt = datetime.strptime(f"{date_str} {time_str}", "%d/%m/%Y %H:%M")
+                dt_utc = dt.replace(tzinfo=timezone.utc) - timedelta(hours=7)
+                return dt_utc < now_utc
+            except Exception:
+                return False
+
+        upcoming_pred = [e for e in hist_all if not _is_past(e.get("date",""), e.get("time","00:00"))]
+        past_pred     = [e for e in hist_all if _is_past(e.get("date",""), e.get("time","00:00"))]
+
+        # เติมผลจริงให้ past_pred
+        def _get_real(e):
+            _ek = f"{e['home']}_vs_{e['away']}_{e.get('date','')}"
+            _fm = next((m for m in finished_api
+                        if f"{m['home']}_vs_{m['away']}_{m['date']}" == _ek), None)
+            if _fm:
+                return _fm["real_score"]
+            return e.get("real_score") or "—"
+
+        # ── STATS ───────────────────────────────────────────────────
+        fin_with_result = [e for e in past_pred if _get_real(e) != "—"]
+        total_pred  = len(hist_all)
+        total_fin   = len(fin_with_result)
+        w_correct   = sum(1 for e in fin_with_result if e.get("winner_correct"))
+        s_correct   = sum(1 for e in fin_with_result if e.get("score_correct"))
+        w_acc = round(w_correct / total_fin * 100, 1) if total_fin else 0
+        s_acc = round(s_correct / total_fin * 100, 1) if total_fin else 0
+
+        a1, a2, a3, a4 = st.columns(4, gap="small")
+        for col, val, lbl, color in [
+            (a1, total_pred,   "TOTAL PREDICTED", "#38BDF8"),
+            (a2, total_fin,    "RESULTS IN",      "#F59E0B"),
+            (a3, f"{w_acc}%",  "WINNER ACC",      "#00E676"),
+            (a4, f"{s_acc}%",  "SCORE ACC",       "#A78BFA"),
+        ]:
+            with col:
+                st.markdown(f"""<div class="acc-card">
+                    <div class="acc-num" style="color:{color};">{val}</div>
+                    <div class="acc-lbl">{lbl}</div>
                 </div>""", unsafe_allow_html=True)
-        else:
-            history_sorted = sorted(history, key=lambda x: x.get("saved_at", ""), reverse=True)
-            finished   = [e for e in history_sorted if e.get("real_score") is not None]
-            total_f    = len(finished)
-            w_correct  = sum(1 for e in finished if e.get("winner_correct"))
-            s_correct  = sum(1 for e in finished if e.get("score_correct"))
-            w_acc = round(w_correct / total_f * 100, 1) if total_f else 0
-            s_acc = round(s_correct / total_f * 100, 1) if total_f else 0
 
-            # Summary cards
-            a1, a2, a3, a4 = st.columns(4, gap="small")
-            for col, val, lbl, color in [
-                (a1, len(history_sorted), "TOTAL SAVED",     "#38BDF8"),
-                (a2, total_f,             "RESULTS IN",       "#F59E0B"),
-                (a3, f"{w_acc}%",         "WINNER ACCURACY",  "#00E676"),
-                (a4, f"{s_acc}%",         "SCORE ACCURACY",   "#A78BFA"),
-            ]:
-                with col:
-                    st.markdown(f"""
-                        <div class="acc-card">
-                            <div class="acc-num" style="color:{color};">{val}</div>
-                            <div class="acc-lbl">{lbl}</div>
-                        </div>""", unsafe_allow_html=True)
+        st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
 
-            st.markdown("<div style='margin:16px 0 6px;'></div>", unsafe_allow_html=True)
-
-            # Header
+        # ── TABLE HEADER ────────────────────────────────────────────
+        def _hdr():
             st.markdown("""
             <div class="hst-header">
                 <div>DATE</div>
@@ -649,55 +725,94 @@ def page_fixtures(ctx):
                 <div style="text-align:center;">SCORE</div>
             </div>""", unsafe_allow_html=True)
 
-            # Rows
-            for e in history_sorted:
-                home_logo = _fallback_team_logo(e["home"])
-                away_logo = _fallback_team_logo(e["away"])
-                real_text = e["real_score"] if e.get("real_score") else "—"
-                real_style = "color:#F0F6FF;font-weight:700;" if e.get("real_score") else "color:rgba(148,187,233,0.22);"
+        def _row(e, real_text, upcoming=False):
+            hl  = _fallback_team_logo(e["home"])
+            al  = _fallback_team_logo(e["away"])
+            dl  = _fmt_date(e.get("date",""))
+            if upcoming:
+                w_badge    = '<span class="hst-badge" style="background:rgba(56,189,248,0.10);border:1px solid rgba(56,189,248,0.28);color:#38BDF8;">⏳ Upcoming</span>'
+                s_badge    = '<span class="hst-badge hst-pending">—</span>'
+                row_accent = "rgba(56,189,248,0.10)"
+                real_cell  = '<span style="font-family:\'Rajdhani\',sans-serif;font-size:0.7rem;color:rgba(148,187,233,0.3);letter-spacing:1px;">SCHEDULED</span>'
+                date_style = "color:#38BDF8;background:rgba(56,189,248,0.08);border-color:rgba(56,189,248,0.2);"
+            else:
                 if e.get("winner_correct") is True:
-                    w_badge = '<span class="hst-badge hst-correct">✓ Correct</span>'
+                    w_badge    = '<span class="hst-badge hst-correct">✓ Correct</span>'
+                    row_accent = "rgba(0,230,118,0.10)"
                 elif e.get("winner_correct") is False:
-                    w_badge = '<span class="hst-badge hst-wrong">✗ Wrong</span>'
+                    w_badge    = '<span class="hst-badge hst-wrong">✗ Wrong</span>'
+                    row_accent = "rgba(239,68,68,0.10)"
                 else:
-                    w_badge = '<span class="hst-badge hst-pending">Pending</span>'
-                if e.get("score_correct") is True:
-                    s_badge = '<span class="hst-badge hst-correct">Exact</span>'
-                elif e.get("score_correct") is False:
-                    s_badge = '<span class="hst-badge hst-wrong">Off</span>'
-                else:
-                    s_badge = '<span class="hst-badge hst-pending">—</span>'
-                raw_date = e.get("date", "")
-                try:
-                    from datetime import datetime as _dt3
-                    _d = _dt3.strptime(raw_date, "%d/%m/%Y")
-                    date_label = _d.strftime("%d %b").upper()
-                except Exception:
-                    date_label = raw_date
-                if e.get("winner_correct") is True:
-                    row_accent = "rgba(0,230,118,0.22)"
-                elif e.get("winner_correct") is False:
-                    row_accent = "rgba(239,68,68,0.18)"
-                else:
-                    row_accent = "rgba(255,255,255,0.08)"
-                st.markdown(f"""
-                <div class="hst-row" style="border-color:{row_accent};">
-                    <div class="hst-date-col">
-                        <div class="hst-date-badge">{date_label}</div>
-                        <div class="hst-time">{e.get('time','')}</div>
-                    </div>
-                    <div class="hst-home">
-                        <span class="hst-name">{e['home']}</span>
-                        <img class="hst-logo" src="{home_logo}" onerror="this.src='{DEFAULT_LOGO}'"/>
-                    </div>
-                    <div class="hst-vs">vs</div>
-                    <div class="hst-away">
-                        <img class="hst-logo" src="{away_logo}" onerror="this.src='{DEFAULT_LOGO}'"/>
-                        <span class="hst-name">{e['away']}</span>
-                    </div>
-                    <div class="hst-score-pred">{e.get('pred_score','—')}</div>
-                    <div class="hst-score-real" style="{real_style}">{real_text}</div>
-                    <div class="hst-badge-wrap">{w_badge}</div>
-                    <div class="hst-badge-wrap">{s_badge}</div>
+                    w_badge    = '<span class="hst-badge hst-pending">Pending</span>'
+                    row_accent = "rgba(255,255,255,0.05)"
+                s_badge = (
+                    '<span class="hst-badge hst-correct">Exact</span>' if e.get("score_correct") is True
+                    else '<span class="hst-badge hst-wrong">Off</span>' if e.get("score_correct") is False
+                    else '<span class="hst-badge hst-pending">—</span>'
+                )
+                has_r      = real_text != "—"
+                real_cell  = f'<span style="font-family:\'Orbitron\',sans-serif;font-size:0.88rem;font-weight:700;{"color:#E8F0FF;" if has_r else "color:rgba(148,187,233,0.22);"}">{real_text}</span>'
+                date_style = ""
+            st.markdown(f"""
+            <div class="hst-row" style="border-color:{row_accent};">
+                <div class="hst-date-col">
+                    <div class="hst-date-badge" style="{date_style}">{dl}</div>
+                    <div class="hst-time">{e.get("time","")}</div>
                 </div>
-                """, unsafe_allow_html=True)
+                <div class="hst-home">
+                    <span class="hst-name">{e["home"]}</span>
+                    <img class="hst-logo" src="{hl}" onerror="this.src='{DEFAULT_LOGO}'"/>
+                </div>
+                <div class="hst-vs">vs</div>
+                <div class="hst-away">
+                    <img class="hst-logo" src="{al}" onerror="this.src='{DEFAULT_LOGO}'"/>
+                    <span class="hst-name">{e["away"]}</span>
+                </div>
+                <div class="hst-score-pred">{e.get("pred_score","—")}</div>
+                <div class="hst-score-real" style="text-align:center;">{real_cell}</div>
+                <div class="hst-badge-wrap">{w_badge}</div>
+                <div class="hst-badge-wrap">{s_badge}</div>
+            </div>""", unsafe_allow_html=True)
+
+        # ════════════════════════════════════════════════════════════
+        # SECTION 1 — แมตที่ทายแล้ว กำลังจะแข่ง (5 อันดับแรก)
+        # ════════════════════════════════════════════════════════════
+        st.markdown("""
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+            <div class="hst-section-label" style="margin:0;border:none;">⏳ UPCOMING — ALREADY PREDICTED</div>
+            <div style="font-family:'Rajdhani',sans-serif;font-size:0.65rem;color:rgba(56,189,248,0.4);
+                letter-spacing:1.5px;background:rgba(56,189,248,0.07);border:1px solid rgba(56,189,248,0.15);
+                border-radius:4px;padding:2px 8px;">NEXT 5</div>
+        </div>""", unsafe_allow_html=True)
+
+        show_upcoming = upcoming_pred[:5]
+        if not show_upcoming:
+            st.markdown('<div class="hst-empty-note">No upcoming predicted matches — go to Fixtures and click Analyse!</div>',
+                        unsafe_allow_html=True)
+        else:
+            _hdr()
+            for e in show_upcoming:
+                _row(e, "—", upcoming=True)
+
+        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+
+        # ════════════════════════════════════════════════════════════
+        # SECTION 2 — ประวัติการทายทั้งหมด
+        # ════════════════════════════════════════════════════════════
+        st.markdown("""
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+            <div class="hst-section-label" style="margin:0;border:none;">📋 ALL PREDICTIONS</div>
+            <div style="font-family:'Rajdhani',sans-serif;font-size:0.65rem;color:rgba(148,187,233,0.4);
+                letter-spacing:1.5px;background:rgba(148,187,233,0.05);border:1px solid rgba(148,187,233,0.12);
+                border-radius:4px;padding:2px 8px;">NEWEST FIRST</div>
+        </div>""", unsafe_allow_html=True)
+
+        if not hist_all:
+            st.markdown('<div class="hst-empty-note">No predictions yet — click Analyse on any fixture to start!</div>',
+                        unsafe_allow_html=True)
+        else:
+            _hdr()
+            for e in hist_all:
+                real_text = _get_real(e)
+                is_up     = not _is_past(e.get("date",""), e.get("time","00:00"))
+                _row(e, real_text, upcoming=is_up)
