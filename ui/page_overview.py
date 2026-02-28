@@ -4,7 +4,7 @@ Redesigned: Broadcast-grade tactical board aesthetic. Full English. Larger typog
 """
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from src.config import TODAY, API_KEY
 from utils import silent
@@ -140,54 +140,69 @@ def page_overview(ctx):
         background: var(--bg2);
         border: 1px solid var(--border);
         border-radius: 12px;
-        padding: 0.9rem 1.1rem;
+        padding: 0.85rem 1.2rem;
         margin-bottom: 0.55rem;
-        display: flex; align-items: center; gap: 12px;
+        display: grid;
+        grid-template-columns: 80px 1fr auto;
+        align-items: center;
+        gap: 12px;
         transition: border-color 0.2s;
     }
     .match-block:hover { border-color: rgba(255,255,255,0.12); }
-    .match-block.live { border-left: 3px solid var(--green); }
+    .match-block.live { border-left: 3px solid var(--green); background: rgba(0,230,118,0.02); }
     .match-block.upcoming { border-left: 3px solid var(--blue); }
 
     .match-badge {
         font-family: 'Barlow', sans-serif;
         font-size: 0.6rem; font-weight: 700;
         letter-spacing: 0.1em; text-transform: uppercase;
-        padding: 2px 8px; border-radius: 20px;
-        flex-shrink: 0;
+        padding: 3px 8px; border-radius: 20px;
+        text-align: center;
     }
     .badge-live {
         background: rgba(0,230,118,0.15); color: var(--green);
         border: 1px solid rgba(0,230,118,0.3);
-        animation: pulse 2s infinite;
+        animation: pulse 1.5s infinite;
     }
     .badge-sched {
         background: rgba(0,180,255,0.12); color: var(--blue);
         border: 1px solid rgba(0,180,255,0.25);
     }
     @keyframes pulse {
-        0%,100% { opacity: 1; } 50% { opacity: 0.6; }
+        0%,100% { opacity: 1; } 50% { opacity: 0.4; }
     }
     .match-teams {
+        display: grid;
+        grid-template-columns: 1fr 52px 1fr;
+        align-items: center;
+    }
+    .match-team-home {
+        display: flex; align-items: center; justify-content: flex-end; gap: 8px;
         font-family: 'Barlow Condensed', sans-serif;
-        font-size: 1.1rem; font-weight: 700;
-        color: var(--text1); letter-spacing: 0.02em; flex: 1;
+        font-size: 1.05rem; font-weight: 700;
+        color: var(--text1); letter-spacing: 0.02em;
     }
-    .match-teams-logos {
-        display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
-    }
-    .match-team {
-        display: inline-flex; align-items: center; gap: 6px;
+    .match-team-away {
+        display: flex; align-items: center; justify-content: flex-start; gap: 8px;
+        font-family: 'Barlow Condensed', sans-serif;
+        font-size: 1.05rem; font-weight: 700;
+        color: var(--text1); letter-spacing: 0.02em;
     }
     .match-logo {
-        width: 20px; height: 20px; object-fit: contain; flex-shrink: 0;
+        width: 22px; height: 22px; object-fit: contain; flex-shrink: 0;
         filter: drop-shadow(0 1px 4px rgba(0,0,0,0.35));
     }
-    .match-vs { color: var(--text3); font-weight: 400; margin: 0 4px; }
+    .match-center {
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+    }
     .match-score {
         font-family: 'Barlow Condensed', sans-serif;
-        font-size: 1.3rem; font-weight: 800;
-        color: var(--green); letter-spacing: 0.04em; flex-shrink: 0;
+        font-size: 1.25rem; font-weight: 800;
+        color: var(--green); letter-spacing: 0.06em; line-height: 1;
+    }
+    .match-vs {
+        font-family: 'Barlow', sans-serif;
+        font-size: 0.72rem; color: var(--text3); font-weight: 500;
     }
     .match-time {
         font-family: 'Barlow', sans-serif;
@@ -321,48 +336,112 @@ def page_overview(ctx):
         st.markdown('<div class="sec-label">Live &amp; Upcoming Matches</div>',
                     unsafe_allow_html=True)
 
-        @st.cache_data(ttl=60, show_spinner=False)
+        @st.cache_data(ttl=20, show_spinner=False)
         def _fetch_matches():
             import requests as _req
             headers = {"X-Auth-Token": API_KEY}
             live, upcoming = [], []
             try:
-                r = _req.get("https://api.football-data.org/v4/competitions/PL/matches",
-                             headers=headers, params={"status": "IN_PLAY,PAUSED"}, timeout=8)
-                if r.ok:
-                    for m in r.json().get("matches", []):
-                        utc = datetime.fromisoformat(m["utcDate"].replace("Z", "+00:00"))
-                        th  = utc + timedelta(hours=7)
-                        sh  = m['score']['fullTime'].get('home') or 0
-                        sa  = m['score']['fullTime'].get('away') or 0
-                        home_id = m["homeTeam"].get("id")
-                        away_id = m["awayTeam"].get("id")
+                now_utc = datetime.now(timezone.utc)
+                today_s = (now_utc - timedelta(hours=1)).strftime("%Y-%m-%d")
+                today_e = (now_utc + timedelta(days=1)).strftime("%Y-%m-%d")
+
+                # Fetch today's matches + next upcoming in one call
+                r = _req.get(
+                    "https://api.football-data.org/v4/competitions/PL/matches",
+                    headers=headers,
+                    params={"dateFrom": today_s, "dateTo": today_e},
+                    timeout=8,
+                )
+                today_matches = r.json().get("matches", []) if r.ok else []
+
+                # Also fetch next SCHEDULED to fill upcoming if today is empty
+                r2 = _req.get(
+                    "https://api.football-data.org/v4/competitions/PL/matches",
+                    headers=headers,
+                    params={"status": "SCHEDULED"},
+                    timeout=8,
+                )
+                sched_matches = sorted(
+                    r2.json().get("matches", []) if r2.ok else [],
+                    key=lambda x: x["utcDate"],
+                )
+
+                def _logo(m, side):
+                    tid = m[side].get("id")
+                    return m[side].get("crest") or (
+                        f"https://crests.football-data.org/{tid}.png" if tid else default_logo
+                    )
+
+                for m in sorted(today_matches, key=lambda x: x["utcDate"]):
+                    utc = datetime.fromisoformat(m["utcDate"].replace("Z", "+00:00"))
+                    th  = utc + timedelta(hours=7)
+                    status = m.get("status", "")
+
+                    # ── LIVE: API says IN_PLAY/PAUSED/HALFTIME ──────────────
+                    if status in ("IN_PLAY", "PAUSED", "HALFTIME"):
+                        sc = m.get("score", {})
+                        ft = sc.get("fullTime") or {}
+                        sh = ft.get("home") if ft.get("home") is not None else 0
+                        sa = ft.get("away") if ft.get("away") is not None else 0
+                        minute = m.get("minute", "")
                         live.append({
-                            "home":  m["homeTeam"].get("shortName") or m["homeTeam"]["name"],
-                            "away":  m["awayTeam"].get("shortName") or m["awayTeam"]["name"],
-                            "score": f"{sh}  –  {sa}",
-                            "min":   m.get("minute", ""),
-                            "time":  th.strftime("%H:%M"),
-                            "home_logo": m["homeTeam"].get("crest") or (f"https://crests.football-data.org/{home_id}.png" if home_id else default_logo),
-                            "away_logo": m["awayTeam"].get("crest") or (f"https://crests.football-data.org/{away_id}.png" if away_id else default_logo),
+                            "home":    m["homeTeam"].get("shortName") or m["homeTeam"]["name"],
+                            "away":    m["awayTeam"].get("shortName") or m["awayTeam"]["name"],
+                            "score_h": sh, "score_a": sa,
+                            "min":     f"{minute}'" if minute else "LIVE",
+                            "time":    th.strftime("%H:%M"),
+                            "home_logo": _logo(m, "homeTeam"),
+                            "away_logo": _logo(m, "awayTeam"),
                         })
-                r2 = _req.get("https://api.football-data.org/v4/competitions/PL/matches",
-                              headers=headers, params={"status": "SCHEDULED"}, timeout=8)
-                if r2.ok:
-                    for m in sorted(r2.json().get("matches", []),
-                                    key=lambda x: x["utcDate"])[:6]:
-                        utc = datetime.fromisoformat(m["utcDate"].replace("Z", "+00:00"))
-                        th  = utc + timedelta(hours=7)
-                        home_id = m["homeTeam"].get("id")
-                        away_id = m["awayTeam"].get("id")
-                        upcoming.append({
-                            "home": m["homeTeam"].get("shortName") or m["homeTeam"]["name"],
-                            "away": m["awayTeam"].get("shortName") or m["awayTeam"]["name"],
-                            "date": th.strftime("%d %b"),
-                            "time": th.strftime("%H:%M"),
-                            "home_logo": m["homeTeam"].get("crest") or (f"https://crests.football-data.org/{home_id}.png" if home_id else default_logo),
-                            "away_logo": m["awayTeam"].get("crest") or (f"https://crests.football-data.org/{away_id}.png" if away_id else default_logo),
+                    # ── INFERRED LIVE: free-tier API lag — SCHEDULED but kickoff passed ──
+                    elif status in ("SCHEDULED", "TIMED") and utc <= now_utc <= utc + timedelta(hours=2, minutes=15):
+                        elapsed = int((now_utc - utc).total_seconds() / 60)
+                        live.append({
+                            "home":    m["homeTeam"].get("shortName") or m["homeTeam"]["name"],
+                            "away":    m["awayTeam"].get("shortName") or m["awayTeam"]["name"],
+                            "score_h": "?", "score_a": "?",
+                            "min":     f"~{elapsed}'",
+                            "time":    th.strftime("%H:%M"),
+                            "home_logo": _logo(m, "homeTeam"),
+                            "away_logo": _logo(m, "awayTeam"),
                         })
+                    # ── UPCOMING: not started yet ───────────────────────────
+                    elif status in ("SCHEDULED", "TIMED") and utc > now_utc:
+                        if len(upcoming) < 6:
+                            upcoming.append({
+                                "home": m["homeTeam"].get("shortName") or m["homeTeam"]["name"],
+                                "away": m["awayTeam"].get("shortName") or m["awayTeam"]["name"],
+                                "date": th.strftime("%d %b"),
+                                "time": th.strftime("%H:%M"),
+                                "home_logo": _logo(m, "homeTeam"),
+                                "away_logo": _logo(m, "awayTeam"),
+                            })
+
+                # Fill remaining upcoming from scheduled list
+                for m in sched_matches:
+                    if len(upcoming) >= 6:
+                        break
+                    utc = datetime.fromisoformat(m["utcDate"].replace("Z", "+00:00"))
+                    if utc <= now_utc:
+                        continue
+                    # skip if already added from today
+                    key = m["utcDate"]
+                    if any(
+                        m["homeTeam"].get("shortName") == u["home"] and u["date"] == (utc + timedelta(hours=7)).strftime("%d %b")
+                        for u in upcoming
+                    ):
+                        continue
+                    th = utc + timedelta(hours=7)
+                    upcoming.append({
+                        "home": m["homeTeam"].get("shortName") or m["homeTeam"]["name"],
+                        "away": m["awayTeam"].get("shortName") or m["awayTeam"]["name"],
+                        "date": th.strftime("%d %b"),
+                        "time": th.strftime("%H:%M"),
+                        "home_logo": _logo(m, "homeTeam"),
+                        "away_logo": _logo(m, "awayTeam"),
+                    })
+
             except Exception:
                 pass
             return live, upcoming
@@ -371,28 +450,27 @@ def page_overview(ctx):
             live_matches, upcoming_matches = _fetch_matches()
 
         if live_matches:
+            st.markdown('<div class="sec-label">Live Now</div>', unsafe_allow_html=True)
             for m in live_matches:
                 st.markdown(f"""
                 <div class="match-block live">
-                    <span class="match-badge badge-live">LIVE {m['min']}'</span>
-                    <div class="match-teams match-teams-logos">
-                        <span class="match-team">
-                            <img class="match-logo" src="{m.get('home_logo', default_logo)}" onerror="this.src='{default_logo}'"/>
+                    <span class="match-badge badge-live">LIVE {m['min']}</span>
+                    <div class="match-teams">
+                        <span class="match-team-home">
                             {m['home']}
+                            <img class="match-logo" src="{m.get('home_logo', default_logo)}" onerror="this.src='{default_logo}'"/>
                         </span>
-                        <span class="match-vs">vs</span>
-                        <span class="match-team">
+                        <div class="match-center">
+                            <div class="match-score">{m['score_h']} – {m['score_a']}</div>
+                        </div>
+                        <span class="match-team-away">
                             <img class="match-logo" src="{m.get('away_logo', default_logo)}" onerror="this.src='{default_logo}'"/>
                             {m['away']}
                         </span>
                     </div>
-                    <div class="match-score">{m['score']}</div>
+                    <div class="match-time">{m['time']}</div>
                 </div>
                 """, unsafe_allow_html=True)
-        else:
-            st.markdown("""
-            <div class="no-match">No matches currently in play.</div>
-            """, unsafe_allow_html=True)
 
         if upcoming_matches:
             st.markdown('<div class="sec-label" style="margin-top:1rem">Next Fixtures</div>',
@@ -401,13 +479,15 @@ def page_overview(ctx):
                 st.markdown(f"""
                 <div class="match-block upcoming">
                     <span class="match-badge badge-sched">{m['date']}</span>
-                    <div class="match-teams match-teams-logos">
-                        <span class="match-team">
-                            <img class="match-logo" src="{m.get('home_logo', default_logo)}" onerror="this.src='{default_logo}'"/>
+                    <div class="match-teams">
+                        <span class="match-team-home">
                             {m['home']}
+                            <img class="match-logo" src="{m.get('home_logo', default_logo)}" onerror="this.src='{default_logo}'"/>
                         </span>
-                        <span class="match-vs">vs</span>
-                        <span class="match-team">
+                        <div class="match-center">
+                            <div class="match-vs">vs</div>
+                        </div>
+                        <span class="match-team-away">
                             <img class="match-logo" src="{m.get('away_logo', default_logo)}" onerror="this.src='{default_logo}'"/>
                             {m['away']}
                         </span>

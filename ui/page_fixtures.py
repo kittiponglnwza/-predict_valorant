@@ -2,9 +2,38 @@
 ui/page_fixtures.py — Upcoming Fixtures page for Football AI Nexus Engine
 """
 import streamlit as st
+from datetime import datetime, timedelta, timezone
 
 from src.predict import predict_match, predict_score, show_next_pl_fixtures
 from utils import silent
+
+
+def _filter_future_fixtures(fixtures):
+    """Remove fixtures whose kickoff time has already passed (with 5-min grace)."""
+    if not fixtures:
+        return fixtures
+    now_th = datetime.now(timezone.utc) + timedelta(hours=7)  # Thailand time
+    future = []
+    for f in fixtures:
+        try:
+            date_str = f.get('Date', '')   # e.g. "01 Mar"
+            time_str = f.get('Time', '00:00')  # e.g. "21:00"
+            if not date_str or date_str == '—':
+                future.append(f)
+                continue
+            # Parse kickoff in TH time
+            year = now_th.year
+            dt_str = f"{date_str} {year} {time_str}"
+            kickoff = datetime.strptime(dt_str, "%d %b %Y %H:%M")
+            # If month seems in the past (e.g. Dec when now is Jan), try next year
+            if kickoff.month < now_th.month - 3:
+                kickoff = kickoff.replace(year=year + 1)
+            # Keep if kickoff is in the future (allow 5 min grace period)
+            if kickoff >= now_th.replace(tzinfo=None) - timedelta(minutes=5):
+                future.append(f)
+        except Exception:
+            future.append(f)  # Keep if can't parse
+    return future
 
 DEFAULT_LOGO = "https://upload.wikimedia.org/wikipedia/en/f/f2/Premier_League_Logo.svg"
 TEAM_LOGOS = {
@@ -197,7 +226,7 @@ def page_fixtures(ctx):
     # ── PAGE HEADER ───────────────────────────────────────────────────────────
     st.markdown("""
         <div class="fx-page-header">
-            <div class="fx-eyebrow">⚡ Nexus Engine · Premier League</div>
+            <div class="fx-eyebrow">Nexus Engine · Premier League</div>
             <div class="fx-title">Next <em>Fixtures</em></div>
             <div class="fx-subtitle">Upcoming matches with AI win probability &amp; score prediction</div>
         </div>
@@ -210,7 +239,9 @@ def page_fixtures(ctx):
         with c_mid:
             n = st.number_input("Matches to fetch", min_value=1, max_value=20, value=5)
 
-    # ── AUTO-FETCH on first load, n change, or manual refresh ─────────────────
+    # ── FETCH + FILTER ────────────────────────────────────────────────────────
+    # Always re-fetch if n changed or cache is stale (> 2 min)
+    cache_age = (datetime.now(timezone.utc) - st.session_state.get("fx_fetched_at", datetime.min.replace(tzinfo=timezone.utc))).total_seconds()
     needs_id_refresh = any(
         ("HomeID" not in m or "AwayID" not in m or "HomeLogo" not in m or "AwayLogo" not in m) or
         (not (m.get("HomeLogo") or m.get("HomeID"))) or
@@ -218,13 +249,17 @@ def page_fixtures(ctx):
         for m in st.session_state.get("fx_upcoming", [])
         if isinstance(m, dict)
     )
-    if "fx_upcoming" not in st.session_state or st.session_state.get("fx_n") != n or needs_id_refresh:
+    if "fx_upcoming" not in st.session_state or st.session_state.get("fx_n") != n or needs_id_refresh or cache_age > 120:
         with st.spinner("Fetching fixtures..."):
-            upcoming = silent(show_next_pl_fixtures, ctx, num_matches=n)
-        st.session_state["fx_upcoming"] = upcoming
+            raw = silent(show_next_pl_fixtures, ctx, num_matches=n + 10)  # fetch extra to compensate filtering
+        st.session_state["fx_upcoming"] = raw
         st.session_state["fx_n"] = n
+        st.session_state["fx_fetched_at"] = datetime.now(timezone.utc)
     else:
-        upcoming = st.session_state["fx_upcoming"]
+        raw = st.session_state["fx_upcoming"]
+
+    # Filter out past matches in real-time (done every render, not cached)
+    upcoming = _filter_future_fixtures(raw)[:n] if raw else raw
 
     # ── RESULTS ───────────────────────────────────────────────────────────────
     if upcoming:
