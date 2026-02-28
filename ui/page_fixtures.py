@@ -167,6 +167,7 @@ def _fetch_real_scores():
 
 SEASON_START = "2025-08-01"   # ต้นฤดูกาล 2025/26
 SEASON_CACHE_FILE = "data/season_history_cache.json"
+CACHE_VERSION = "v2_poisson"  # เปลี่ยนเมื่อ logic เปลี่ยน → force re-predict
 
 
 def _load_season_cache():
@@ -226,9 +227,26 @@ def _build_season_history(ctx, status_placeholder=None):
 
             cache_key = f"{home_raw}_vs_{away_raw}_{date_str}"
 
-            # ถ้า cache มีแล้วและ predict เสร็จแล้ว → ข้าม
+            # ถ้า cache มีแล้ว → ตรวจ version + consistency ก่อน skip
             if cache_key in cache and cache[cache_key].get("pred_score") not in (None, "—"):
-                continue
+                _cached_entry = cache[cache_key]
+                # version check — ถ้า version เก่า → re-predict
+                if _cached_entry.get("cache_version") != CACHE_VERSION:
+                    pass  # ตกลงมา re-predict
+                else:
+                    _cs = _cached_entry.get("pred_score", "")
+                    _cw = _cached_entry.get("pred_winner", "")
+                    # consistency check — pred_score กับ pred_winner ต้องตรงกัน
+                    _ok = False
+                    try:
+                        _ch, _ca = map(int, _cs.split("-"))
+                        _derived_w = "Home" if _ch > _ca else ("Away" if _ca > _ch else "Draw")
+                        _ok = (_derived_w == _cw)
+                    except Exception:
+                        _ok = True  # parse ไม่ได้ → ไม่บังคับ re-predict
+                    if _ok:
+                        continue
+                # ไม่ผ่าน → re-predict
 
             # ── 3. AI predict ──────────────────────────────────────
             if status_placeholder:
@@ -246,12 +264,22 @@ def _build_season_history(ctx, status_placeholder=None):
             real_winner = ("Home" if sh > sa else ("Away" if sa > sh else "Draw")) if sh is not None else None
 
             if _r and _s:
-                h_prob, d_prob, a_prob = _r["Home Win"], _r["Draw"], _r["Away Win"]
-                pred_score  = _s["most_likely_score"]
-                pred_winner = (
-                    "Home" if h_prob >= d_prob and h_prob >= a_prob
-                    else ("Draw" if d_prob >= a_prob else "Away")
-                )
+                # ── ใช้ Poisson prob (จาก predict_score) เป็น source of truth ──
+                # เพราะ pred_score มาจาก Poisson ตัวเดียวกัน → ไม่ขัดกันแน่นอน
+                # predict_match (Hybrid) เก็บไว้แสดง bar chart เท่านั้น ไม่ใช้ decide winner
+                h_prob = _s.get("poisson_home_win", _r["Home Win"])
+                d_prob = _s.get("poisson_draw",     _r["Draw"])
+                a_prob = _s.get("poisson_away_win", _r["Away Win"])
+
+                # pred_winner derive จาก most_likely_score โดยตรง → consistent 100%
+                pred_score = _s["most_likely_score"]
+                try:
+                    _mh, _ma = map(int, pred_score.split("-"))
+                    pred_winner = "Home" if _mh > _ma else ("Away" if _ma > _mh else "Draw")
+                except Exception:
+                    pred_winner = "Home" if h_prob >= d_prob and h_prob >= a_prob \
+                                  else ("Draw" if d_prob >= a_prob else "Away")
+
                 winner_correct = (pred_winner == real_winner) if real_winner else None
                 score_correct  = (pred_score == real_score)   if real_score  else None
             else:
@@ -260,6 +288,7 @@ def _build_season_history(ctx, status_placeholder=None):
                 winner_correct = score_correct = None
 
             cache[cache_key] = {
+                "cache_version":  CACHE_VERSION,
                 "key":            cache_key,
                 "home":           home_raw,
                 "away":           away_raw,
@@ -530,14 +559,23 @@ def page_fixtures(ctx):
                 r = silent(predict_match, f["HomeTeam"], f["AwayTeam"], ctx)
                 s = silent(predict_score, f["HomeTeam"], f["AwayTeam"], ctx)
                 if r and s:
-                    h_prob = r["Home Win"]
-                    d_prob = r["Draw"]
-                    a_prob = r["Away Win"]
-                    score  = s["most_likely_score"]
+                    # ใช้ Poisson prob → consistent กับ score ที่มาจาก Poisson เดียวกัน
+                    h_prob = s.get("poisson_home_win", r["Home Win"])
+                    d_prob = s.get("poisson_draw",     r["Draw"])
+                    a_prob = s.get("poisson_away_win", r["Away Win"])
                     max_prob = max(h_prob, d_prob, a_prob)
-                    h_color = "#38BDF8" if h_prob == max_prob else "#64748B"
-                    d_color = "#F59E0B" if d_prob == max_prob else "#64748B"
-                    a_color = "#A78BFA" if a_prob == max_prob else "#64748B"
+
+                    # derive score และ pred_winner จาก most_likely_score โดยตรง
+                    score = s["most_likely_score"]
+                    try:
+                        _sh, _sa = map(int, score.split("-"))
+                        pred_winner = "Home" if _sh > _sa else ("Away" if _sa > _sh else "Draw")
+                    except Exception:
+                        pred_winner = "Home" if h_prob == max_prob else ("Draw" if d_prob == max_prob else "Away")
+
+                    h_color = "#38BDF8" if pred_winner == "Home" else "#64748B"
+                    d_color = "#F59E0B" if pred_winner == "Draw" else "#64748B"
+                    a_color = "#A78BFA" if pred_winner == "Away" else "#64748B"
                     home_logo     = _crest_url(f.get("HomeTeam"), f.get("HomeLogo"), f.get("HomeID"))
                     away_logo     = _crest_url(f.get("AwayTeam"), f.get("AwayLogo"), f.get("AwayID"))
                     home_fallback = _fallback_team_logo(f.get("HomeTeam"))
@@ -548,13 +586,13 @@ def page_fixtures(ctx):
                     except Exception:
                         date_label = raw_date
 
-                    # ── AI PRED ──
-                    if h_prob == max_prob:
+                    # ── AI PRED — derive จาก pred_winner (consistent กับ score) ──
+                    if pred_winner == "Home":
                         pred_team  = f["HomeTeam"].split()[-1]
                         pred_pct   = h_prob
                         pred_color = "#38BDF8"
                         pred_sub   = "Win"
-                    elif d_prob == max_prob:
+                    elif pred_winner == "Draw":
                         pred_team  = "Draw"
                         pred_pct   = d_prob
                         pred_color = "#F59E0B"
@@ -692,7 +730,7 @@ def page_fixtures(ctx):
             </div>""", unsafe_allow_html=True)
 
         # ── ROW RENDERER ───────────────────────────────────────────────────────
-        def _row_upcoming(m, pred_score, h_prob, d_prob, a_prob):
+        def _row_upcoming(m, pred_score, h_prob, d_prob, a_prob, pred_winner=None):
             """แถว upcoming — ดึงผลทำนายจาก AI"""
             hl = _fallback_team_logo(m["home"])
             al = _fallback_team_logo(m["away"])
@@ -702,12 +740,16 @@ def page_fixtures(ctx):
             dc = "#F59E0B" if d_prob == max_p else "rgba(148,187,233,0.35)"
             ac = "#A78BFA" if a_prob == max_p else "rgba(148,187,233,0.35)"
 
-            # AI PRED cell
-            if h_prob == max_p:
+            # AI PRED cell — ใช้ pred_winner (ที่ derive จาก score แล้ว) ถ้ามี
+            # เพื่อให้ pred_label สอดคล้องกับ AI SCORE เสมอ
+            if pred_winner is None:
+                pred_winner = "Home" if h_prob == max_p else ("Draw" if d_prob == max_p else "Away")
+
+            if pred_winner == "Home":
                 pred_label = m["home"].split()[-1]
                 pred_pct   = h_prob
                 pred_color = "#38BDF8"
-            elif d_prob == max_p:
+            elif pred_winner == "Draw":
                 pred_label = "Draw"
                 pred_pct   = d_prob
                 pred_color = "#F59E0B"
@@ -734,7 +776,13 @@ def page_fixtures(ctx):
                 <div class="hst-score-pred">{pred_score}</div>
                 <div style="text-align:center;line-height:1.2">
                     <div style="font-family:Rajdhani,sans-serif;font-size:0.82rem;font-weight:700;color:{pred_color};">{pred_label}</div>
-                    <div style="font-family:Rajdhani,sans-serif;font-size:0.68rem;color:rgba(148,187,233,0.4);">{pred_pct}%</div>
+                    <div style="font-family:Rajdhani,sans-serif;font-size:0.68rem;color:rgba(148,187,233,0.4);">
+                        <span style="color:{hc};">{h_prob}%</span>
+                        <span style="color:rgba(148,187,233,0.2);"> / </span>
+                        <span style="color:{dc};">{d_prob}%</span>
+                        <span style="color:rgba(148,187,233,0.2);"> / </span>
+                        <span style="color:{ac};">{a_prob}%</span>
+                    </div>
                 </div>
                 <div class="hst-score-real">
                     <span style="font-family:'Rajdhani',sans-serif;font-size:0.65rem;color:rgba(148,187,233,0.3);letter-spacing:1px;">TBD</span>
@@ -742,12 +790,8 @@ def page_fixtures(ctx):
                 <div class="hst-badge-wrap">
                     <span class="hst-badge hst-upcoming">⏳ Upcoming</span>
                 </div>
-                <div style="text-align:center;font-family:Rajdhani,sans-serif;font-size:0.72rem;">
-                    <span style="color:{hc};">{h_prob}%</span>
-                    <span style="color:rgba(148,187,233,0.2);"> / </span>
-                    <span style="color:{dc};">{d_prob}%</span>
-                    <span style="color:rgba(148,187,233,0.2);"> / </span>
-                    <span style="color:{ac};">{a_prob}%</span>
+                <div class="hst-badge-wrap">
+                    <span class="hst-badge hst-pending">—</span>
                 </div>
             </div>""", unsafe_allow_html=True)
 
@@ -843,12 +887,21 @@ def page_fixtures(ctx):
         else:
             _hdr()
             for m in next5:
-                # ใช้ predict_match/predict_score จาก model โดยตรง ไม่ยิง API
                 _r = silent(predict_match, m["home"], m["away"], ctx)
                 _s = silent(predict_score, m["home"], m["away"], ctx)
                 if _r and _s:
-                    _row_upcoming(m, _s["most_likely_score"],
-                                  _r["Home Win"], _r["Draw"], _r["Away Win"])
+                    # ใช้ Poisson prob → consistent กับ pred_score ที่มาจาก Poisson เดียวกัน
+                    _h = _s.get("poisson_home_win", _r["Home Win"])
+                    _d = _s.get("poisson_draw",     _r["Draw"])
+                    _a = _s.get("poisson_away_win", _r["Away Win"])
+                    # derive pred_winner จาก most_likely_score โดยตรง
+                    _ps = _s["most_likely_score"]
+                    try:
+                        _mh, _ma = map(int, _ps.split("-"))
+                        _pw = "Home" if _mh > _ma else ("Away" if _ma > _mh else "Draw")
+                    except Exception:
+                        _pw = "Home" if _h >= _d and _h >= _a else ("Draw" if _d >= _a else "Away")
+                    _row_upcoming(m, _ps, _h, _d, _a, pred_winner=_pw)
                 else:
                     st.markdown(f'<div class="hst-empty">{m["home"]} vs {m["away"]} — prediction unavailable</div>',
                                 unsafe_allow_html=True)
@@ -868,6 +921,26 @@ def page_fixtures(ctx):
             except Exception: return datetime.min
 
         if _cached:
+            # fix on-the-fly: แก้ entry ที่ pred_score กับ pred_winner ไม่ consistent
+            # (เกิดจาก cache เก่าที่ใช้ LightGBM hybrid ทาย winner)
+            _fixed = False
+            for _e in _cached.values():
+                _cs = _e.get("pred_score", "")
+                _cw = _e.get("pred_winner", "")
+                if not _cs or _cs == "—" or not _cw or _cw == "—":
+                    continue
+                try:
+                    _ch, _ca = map(int, _cs.split("-"))
+                    _correct_w = "Home" if _ch > _ca else ("Away" if _ca > _ch else "Draw")
+                    if _correct_w != _cw:
+                        _e["pred_winner"] = _correct_w
+                        _rw = _e.get("real_winner")
+                        _e["winner_correct"] = (_correct_w == _rw) if _rw else None
+                        _fixed = True
+                except Exception:
+                    pass
+            if _fixed:
+                _save_season_cache(_cached)
             season_entries = sorted(_cached.values(), key=_pdate, reverse=True)
         else:
             season_entries = []
