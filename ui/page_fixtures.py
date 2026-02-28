@@ -165,7 +165,7 @@ def _fetch_real_scores():
 # BUILD FULL SEASON HISTORY — ดึงทุกแมตจบตั้งแต่ต้นฤดูกาล + AI re-predict
 # ─────────────────────────────────────────────────────────────────────────────
 
-SEASON_START = "2024-08-01"   # ต้นฤดูกาล 2024/25
+SEASON_START = "2025-08-01"   # ต้นฤดูกาล 2025/26
 SEASON_CACHE_FILE = "data/season_history_cache.json"
 
 
@@ -203,7 +203,7 @@ def _build_season_history(ctx, status_placeholder=None):
         r = requests.get(
             "https://api.football-data.org/v4/competitions/PL/matches",
             headers={"X-Auth-Token": API_KEY},
-            params={"season": "2024"},
+            params={"season": "2025"},
             timeout=15,
         )
         if not r.ok:
