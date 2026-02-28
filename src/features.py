@@ -28,7 +28,16 @@ def load_data():
         date_monthfirst = pd.to_datetime(data.loc[date_dayfirst.isna(), 'Date'], dayfirst=False, errors='coerce')
         date_dayfirst.loc[date_dayfirst.isna()] = date_monthfirst
     data['Date'] = date_dayfirst
-    data            = data.sort_values('Date').reset_index(drop=True)
+    data = data.sort_values('Date').reset_index(drop=True)
+
+    # ✅ กรองเกมที่ยังไม่มีผล (FTR = NaN) — เกมในอนาคตที่ยังไม่ได้แข่ง
+    if 'FTR' in data.columns:
+        before = len(data)
+        data = data[data['FTR'].notna()].reset_index(drop=True)
+        removed = before - len(data)
+        if removed > 0:
+            print(f"✅ กรองเกมที่ยังไม่มีผลออก: {removed} เกม (เหลือ {len(data)} เกมที่มีผลจริง)")
+
     season_series = np.where(data['Date'].dt.month >= 8, data['Date'].dt.year, data['Date'].dt.year - 1)
     season_count = int(pd.Series(season_series).dropna().nunique())
     recommended_seasons = int(os.getenv("MIN_RECOMMENDED_SEASONS", "8"))

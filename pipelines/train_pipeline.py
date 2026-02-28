@@ -27,7 +27,7 @@ from src.training.trainer import (
 
 
 REPORT_PATH = Path("artifacts/reports/stabilize_backtest_report.json")
-SELECTION_METRIC = os.getenv("STABILIZE_SELECTION_METRIC", "macro_f1").strip().lower()
+SELECTION_METRIC = os.getenv("STABILIZE_SELECTION_METRIC", "accuracy").strip().lower()
 MIN_RECALL_POLICY = {
     0: float(os.getenv("STABILIZE_MIN_RECALL_AWAY", "0.10")),
     1: float(os.getenv("STABILIZE_MIN_RECALL_DRAW", "0.08")),
@@ -473,3 +473,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    

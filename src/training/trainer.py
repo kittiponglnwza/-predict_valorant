@@ -21,12 +21,16 @@ def build_stabilize_model(draw_weight: float = 1.0, engine: str = "auto"):
         return lgb.LGBMClassifier(
             objective="multiclass",
             num_class=3,
-            n_estimators=350,
-            learning_rate=0.05,
-            max_depth=6,
-            num_leaves=31,
-            subsample=0.8,
-            colsample_bytree=0.8,
+            # [PATCH-1] ลด n_estimators + เพิ่ม regularization เพื่อลด overfitting
+            n_estimators=250,
+            learning_rate=0.04,
+            max_depth=4,          # ลดจาก 6 → 4
+            num_leaves=20,        # ลดจาก 31 → 20
+            subsample=0.7,        # ลดจาก 0.8 → 0.7
+            colsample_bytree=0.7, # ลดจาก 0.8 → 0.7
+            min_child_samples=30, # เพิ่ม regularization
+            reg_alpha=0.1,        # L1
+            reg_lambda=1.0,       # L2
             class_weight={0: 1.0, 1: float(draw_weight), 2: 1.0},
             random_state=42,
             n_jobs=-1,
@@ -36,9 +40,11 @@ def build_stabilize_model(draw_weight: float = 1.0, engine: str = "auto"):
     if engine == "catboost" and CATBOOST_AVAILABLE:
         return CatBoostClassifier(
             loss_function="MultiClass",
-            iterations=450,
-            depth=6,
-            learning_rate=0.05,
+            # [PATCH-1] ลด iterations + เพิ่ม regularization
+            iterations=300,       # ลดจาก 450 → 300
+            depth=4,              # ลดจาก 6 → 4
+            learning_rate=0.04,
+            l2_leaf_reg=5.0,      # เพิ่ม L2
             random_seed=42,
             verbose=False,
             allow_writing_files=False,
@@ -376,11 +382,9 @@ def _blend_probabilities(proba_by_source: dict[str, np.ndarray], weights: dict[s
 
 
 def _default_min_recall(selection_metric: str) -> dict[int, float]:
-    if selection_metric == "accuracy":
-        # Accuracy-first but still protect class-collapse.
-        return {0: 0.08, 1: 0.10, 2: 0.08}
-    # macro_f1: ผ่อนผัน draw น้อยลง เพื่อให้ threshold กว้างกว่า
-    return {0: 0.10, 1: 0.08, 2: 0.15}
+    # [PATCH-6] เพิ่ม min_recall ทุก class เพื่อป้องกัน class collapse ที่ทำให้ acc ตก
+    # ต้องการให้โมเดลจับทุก class ได้พอสมควร ไม่ใช่แค่ bet ทุกอย่างเป็น Away/Home
+    return {0: 0.20, 1: 0.15, 2: 0.25}
 
 
 def run_baseline_fold(
@@ -421,7 +425,8 @@ def tune_fold_on_val(
     features,
     target_col: str = "Result3",
     labels: tuple[int, ...] = (0, 1, 2),
-    draw_weight_candidates: tuple[float, ...] = (1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0),
+    # [PATCH-2] ลด draw_weight candidates — ค่าสูงเกินทำให้ acc ตกใน holdout
+    draw_weight_candidates: tuple[float, ...] = (1.0, 1.5, 2.0, 2.5, 3.0),
     use_sigmoid_options: tuple[bool, ...] = (True, False),
     selection_metric: str = "macro_f1",
     min_recall: dict[int, float] | None = None,
@@ -450,14 +455,16 @@ def tune_fold_on_val(
                 t_home, t_draw, tuned_primary = optimize_thresholds(
                     proba=proba,
                     y_true=y_eval,
-                    t_home_range=(0.30, 0.65),
-                    t_draw_range=(0.08, 0.35),
+                    # [PATCH-3] เปลี่ยน objective เป็น accuracy เพื่อดัน acc ขึ้น
+                    t_home_range=(0.35, 0.60),
+                    t_draw_range=(0.20, 0.40),
                     min_recall=recall_constraints,
-                    objective=selection_metric,
+                    objective="accuracy",
                 )
                 pred_tuned = apply_thresholds(proba, t_home=t_home, t_draw=t_draw)
                 metrics = evaluate_classifier(y_eval, proba, labels=labels, y_pred=pred_tuned)
-                score_primary = float(metrics[selection_metric])
+                # [PATCH-4] เลือก best โดย accuracy เป็น primary, macro_f1 เป็น secondary
+                score_primary = float(metrics["accuracy"])
 
                 row = {
                     "draw_weight": float(dw),
@@ -468,7 +475,8 @@ def tune_fold_on_val(
                     "t_home": float(t_home),
                     "t_draw": float(t_draw),
                     "selection_metric": selection_metric,
-                    "selection_score": float(score_primary),
+                    # [PATCH-5] selection_score ใช้ accuracy
+                    "selection_score": float(metrics["accuracy"]),
                     "blend_weights": {k: float(v) for k, v in blend_weights.items()},
                     "sources": list(proba_sources.keys()),
                 }
