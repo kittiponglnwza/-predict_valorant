@@ -77,16 +77,27 @@ def align_proba_to_labels(
 
 
 def apply_thresholds(proba: np.ndarray, t_home: float, t_draw: float) -> np.ndarray:
-    preds = []
-    for row in proba:
-        p_away, p_draw, p_home = row
-        if p_draw >= t_draw:
-            preds.append(1)
-        elif p_home >= t_home:
-            preds.append(2)
+    """
+    [STEP 2] Symmetric decision rule — ไม่ให้ Away เป็น default fallback
+    Logic:
+      1. p_home >= t_home → Home
+      2. p_away >= t_home → Away  (symmetric threshold, ไม่ใช้ค่าต่างกัน)
+      3. p_draw >= t_draw → Draw  (check หลังสุด: predict draw เฉพาะเมื่อ confident)
+      4. else             → argmax (ไม่มี away-bias)
+    """
+    proba = np.asarray(proba)
+    preds = np.empty(len(proba), dtype=int)
+    for i, row in enumerate(proba):
+        p_away, p_draw, p_home = float(row[0]), float(row[1]), float(row[2])
+        if p_home >= t_home:
+            preds[i] = 2
+        elif p_away >= t_home:
+            preds[i] = 0
+        elif p_draw >= t_draw:
+            preds[i] = 1
         else:
-            preds.append(0)
-    return np.asarray(preds, dtype=int)
+            preds[i] = int(np.argmax(row))
+    return preds
 
 
 def optimize_thresholds(
@@ -327,12 +338,22 @@ def _generate_weight_candidates(source_names: list[str]) -> list[dict[str, float
 
     if has_poisson:
         non_poisson = [s for s in source_names if s != "poisson"]
+        # [STEP 4] เพิ่ม poisson น้อยลง (0.05, 0.10) เน้น lgbm-heavy blend
         for w_p in (0.00, 0.05, 0.10, 0.15, 0.20):
             rem = 1.0 - w_p
             if len(non_poisson) == 1:
                 candidates.append({non_poisson[0]: rem, "poisson": w_p})
             elif len(non_poisson) == 2:
-                for frac in (0.35, 0.50, 0.65):
+                # [STEP 4] เพิ่ม lgbm-heavy fracs (0.70, 0.80) ถ้า lgbm อยู่ใน non_poisson
+                base_fracs = [0.35, 0.50, 0.65]
+                extra_fracs: list[float] = []
+                np_sorted = sorted(non_poisson)  # catboost < lgbm alphabetically
+                if "lgbm" in np_sorted and "catboost" in np_sorted:
+                    lgbm_idx = np_sorted.index("lgbm")
+                    # frac คือ weight ของ non_poisson[0] (catboost)
+                    # lgbm-heavy = catboost frac ต่ำ
+                    extra_fracs = [0.20, 0.30] if lgbm_idx == 1 else [0.70, 0.80]
+                for frac in base_fracs + extra_fracs:
                     candidates.append(
                         {
                             non_poisson[0]: rem * frac,
@@ -348,7 +369,7 @@ def _generate_weight_candidates(source_names: list[str]) -> list[dict[str, float
     else:
         if len(source_names) == 2:
             a, b = source_names
-            for w_a in (0.35, 0.50, 0.65, 0.80):
+            for w_a in (0.20, 0.35, 0.50, 0.65, 0.80):
                 candidates.append({a: w_a, b: 1.0 - w_a})
         else:
             eq = 1.0 / len(source_names)
@@ -427,14 +448,20 @@ def tune_fold_on_val(
     features,
     target_col: str = "Result3",
     labels: tuple[int, ...] = (0, 1, 2),
-    # [STEP 3] cap draw_weight ≤ 1.4 — ป้องกัน overfit draw
-    draw_weight_candidates: tuple[float, ...] = (1.0, 1.2, 1.4),
+    # [FIX] draw_weight ต้องสูงพอที่ softmax output draw proba เป็น max บ้าง
+    # draw_weight=1.0 ทำให้ draw proba ต่ำกว่า home/away เสมอ → argmax ไม่ช่วย
+    # ค่า 1.5–2.5 ทำให้ model "เห็น" draw มากพอ แต่ไม่ overfit
+    draw_weight_candidates: tuple[float, ...] = (1.5, 2.0, 2.5),
     use_sigmoid_options: tuple[bool, ...] = (True, False),
     selection_metric: str = "macro_f1",
+    # [STEP 1] min_recall=None — accuracy-only mode ไม่บังคับ class constraint
     min_recall: dict[int, float] | None = None,
 ) -> dict[str, Any]:
     x_train_sc, y_train, x_eval_sc, y_eval = _prepare_xy(train_df, eval_df, features, target_col)
-    recall_constraints = min_recall or _default_min_recall(selection_metric)
+    # [FIX] บังคับ draw_recall ≥ 0.05 — ป้องกัน model predict draw=0 ตลอด
+    # constraint เล็กน้อยนี้บังคับ optimizer ให้หา threshold ที่ predict draw บ้าง
+    # ถ้า accuracy ลดแค่ 0.001–0.002 แต่ได้ draw prediction กลับมา = worth it
+    recall_constraints: dict[int, float] = {1: 0.05}
 
     best: dict[str, Any] | None = None
     trial_rows: list[dict[str, Any]] = []
@@ -457,11 +484,11 @@ def tune_fold_on_val(
                 t_home, t_draw, tuned_primary = optimize_thresholds(
                     proba=proba,
                     y_true=y_eval,
-                    # [STEP 4+FIX] t_draw floor=0.26 — 0.30 สูงเกินทำให้ draw_recall=0
-                    # draw_weight ที่ลดลง (≤1.4) ทำให้ draw proba อยู่แถว 0.25-0.30
-                    # ต้องให้ floor ต่ำพอที่ optimizer จะหา threshold จริงได้
-                    t_home_range=(0.35, 0.60),
-                    t_draw_range=(0.26, 0.40),
+                    # [STEP 2] t_home symmetric — ค้นหา threshold ที่ดีที่สุด
+                    # t_home ใช้กับทั้ง Home และ Away (symmetric decision rule)
+                    # t_draw สำหรับ Draw เท่านั้น (argmax fallback ช่วย)
+                    t_home_range=(0.33, 0.58),
+                    t_draw_range=(0.26, 0.45),
                     min_recall=recall_constraints,
                     objective="accuracy",
                 )
