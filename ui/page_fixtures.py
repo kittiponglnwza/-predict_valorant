@@ -199,18 +199,17 @@ def _build_season_history(ctx, status_placeholder=None):
         import requests
         from src.config import TEAM_NAME_MAP
 
-        # ── 1. ดึงแมตจบทั้งหมดจาก API ──────────────────────────────
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # ── 1. ดึงแมตทั้งหมดฤดูกาล 2024/25 ──────────────────────────
         r = requests.get(
             "https://api.football-data.org/v4/competitions/PL/matches",
             headers={"X-Auth-Token": API_KEY},
-            params={"status": "FINISHED", "dateFrom": SEASON_START, "dateTo": today},
+            params={"season": "2024"},
             timeout=15,
         )
         if not r.ok:
             return []
 
-        all_finished = r.json().get("matches", [])
+        all_finished = [m for m in r.json().get("matches", []) if m.get("status") == "FINISHED"]
 
         # ── 2. โหลด cache ──────────────────────────────────────────
         cache = _load_season_cache()   # key → entry dict
@@ -331,14 +330,16 @@ def _filter_future_fixtures(fixtures):
                 future.append(f)
                 continue
             try:
-                kickoff = datetime.strptime(f"{date_str} {time_str}", "%d/%m/%Y %H:%M")
+                kickoff_local = datetime.strptime(f"{date_str} {time_str}", "%d/%m/%Y %H:%M")
             except ValueError:
                 year = now_utc.year
-                kickoff = datetime.strptime(f"{date_str} {year} {time_str}", "%d %b %Y %H:%M")
-                if kickoff.month < now_utc.month - 3:
-                    kickoff = kickoff.replace(year=year + 1)
-            kickoff_utc = kickoff.replace(tzinfo=timezone.utc) - timedelta(hours=7)
-            if kickoff_utc >= now_utc - timedelta(minutes=5):
+                kickoff_local = datetime.strptime(f"{date_str} {year} {time_str}", "%d %b %Y %H:%M")
+                if kickoff_local.month < now_utc.month - 3:
+                    kickoff_local = kickoff_local.replace(year=year + 1)
+            # Time จาก API เป็น UTC+7 (ไทย) → แปลงกลับเป็น UTC
+            kickoff_utc = kickoff_local.replace(tzinfo=timezone.utc) - timedelta(hours=7)
+            # ให้ buffer 3 ชั่วโมงหลังเตะ (ไม่ตัดแมตที่เพิ่งจบ)
+            if kickoff_utc >= now_utc - timedelta(hours=3):
                 future.append(f)
         except Exception:
             future.append(f)
@@ -393,7 +394,7 @@ _CSS = """<style>
 /* Fixture card */
 .fxc-row {
     display: grid;
-    grid-template-columns: 64px 1fr 24px 1fr 150px 56px 48px;
+    grid-template-columns: 64px 1fr 24px 1fr 110px 110px 56px 48px;
     align-items: center; gap: 0 14px;
     background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.07);
     border-radius: 10px 10px 0 0; padding: 14px 22px; margin-bottom: 0;
@@ -411,6 +412,9 @@ _CSS = """<style>
 .fxc-sep  { color:rgba(148,187,233,0.12); margin:0 1px; }
 .fxc-score { font-family:'Orbitron',sans-serif; font-size:0.85rem; font-weight:700; color:rgba(148,187,233,0.35); letter-spacing:1px; text-align:center; }
 .fxc-time { font-family:'Rajdhani',sans-serif; font-size:0.82rem; font-weight:600; color:rgba(148,187,233,0.3); text-align:right; letter-spacing:0.5px; }
+.fxc-pred { text-align:center; line-height:1.25; }
+.fxc-pred-team { font-family:'Rajdhani',sans-serif; font-size:0.88rem; font-weight:700; white-space:nowrap; }
+.fxc-pred-pct  { font-family:'Rajdhani',sans-serif; font-size:0.68rem; color:rgba(148,187,233,0.4); }
 
 /* Analyse button */
 .stButton:has(button[kind="secondary"]) button {
@@ -437,14 +441,14 @@ _CSS = """<style>
     border-bottom:1px solid rgba(255,255,255,0.06); padding-bottom:10px; margin-bottom:10px;
 }
 .hst-header {
-    display:grid; grid-template-columns:72px 1fr 28px 1fr 76px 76px 96px 72px;
+    display:grid; grid-template-columns:72px 1fr 28px 1fr 76px 100px 76px 96px 72px;
     gap:0 10px; padding:0 22px 8px;
     font-family:'Rajdhani',sans-serif; font-size:0.68rem; font-weight:700;
     letter-spacing:2px; color:rgba(148,187,233,0.38); text-transform:uppercase;
     border-bottom:1px solid rgba(255,255,255,0.07); margin-bottom:6px;
 }
 .hst-row {
-    display:grid; grid-template-columns:72px 1fr 28px 1fr 76px 76px 96px 72px;
+    display:grid; grid-template-columns:72px 1fr 28px 1fr 76px 100px 76px 96px 72px;
     align-items:center; gap:0 10px;
     background:rgba(255,255,255,0.035); border:1px solid rgba(255,255,255,0.08);
     border-radius:9px; padding:11px 22px; margin-bottom:6px;
@@ -544,6 +548,23 @@ def page_fixtures(ctx):
                     except Exception:
                         date_label = raw_date
 
+                    # ── AI PRED ──
+                    if h_prob == max_prob:
+                        pred_team  = f["HomeTeam"].split()[-1]
+                        pred_pct   = h_prob
+                        pred_color = "#38BDF8"
+                        pred_sub   = "Win"
+                    elif d_prob == max_prob:
+                        pred_team  = "Draw"
+                        pred_pct   = d_prob
+                        pred_color = "#F59E0B"
+                        pred_sub   = ""
+                    else:
+                        pred_team  = f["AwayTeam"].split()[-1]
+                        pred_pct   = a_prob
+                        pred_color = "#A78BFA"
+                        pred_sub   = "Win"
+
                     st.markdown(f"""
                     <div class="fxc-row">
                         <div class="fxc-date">{date_label}</div>
@@ -562,6 +583,12 @@ def page_fixtures(ctx):
                             <span class="fxc-plbl">D</span><span style="color:{d_color};">{d_prob}%</span>
                             <span class="fxc-sep">|</span>
                             <span class="fxc-plbl">A</span><span style="color:{a_color};">{a_prob}%</span>
+                        </div>
+                        <div class="fxc-pred">
+                            <div class="fxc-pred-team" style="color:{pred_color};">
+                                {pred_team} {pred_sub}
+                            </div>
+                            <div class="fxc-pred-pct">{pred_pct}%</div>
                         </div>
                         <div class="fxc-score">{score}</div>
                         <div class="fxc-time">{f.get('Time','—')}</div>
@@ -647,29 +674,7 @@ def page_fixtures(ctx):
                     return _m["real_score"]
             return None
 
-        # ── STATS (จาก history ที่กด Analyse แล้วและแข่งจบแล้ว) ──────────────
-        fin_entries = [e for e in hist_all if e.get("real_score") or _get_real_score(e["home"], e["away"], e.get("date",""))]
-        total_pred = len(hist_all)
-        total_fin  = len(fin_entries)
-        w_correct  = sum(1 for e in fin_entries if e.get("winner_correct"))
-        s_correct  = sum(1 for e in fin_entries if e.get("score_correct"))
-        w_acc = round(w_correct / total_fin * 100, 1) if total_fin else 0
-        s_acc = round(s_correct / total_fin * 100, 1) if total_fin else 0
-
-        c1, c2, c3, c4 = st.columns(4, gap="small")
-        for col, val, lbl, color in [
-            (c1, total_pred,  "TOTAL PREDICTED", "#38BDF8"),
-            (c2, total_fin,   "RESULTS IN",      "#F59E0B"),
-            (c3, f"{w_acc}%", "WINNER ACC",      "#00E676"),
-            (c4, f"{s_acc}%", "SCORE ACC",       "#A78BFA"),
-        ]:
-            with col:
-                st.markdown(f"""<div class="acc-card">
-                    <div class="acc-num" style="color:{color};">{val}</div>
-                    <div class="acc-lbl">{lbl}</div>
-                </div>""", unsafe_allow_html=True)
-
-        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
         # ── TABLE HEADER ───────────────────────────────────────────────────────
         def _hdr():
@@ -680,6 +685,7 @@ def page_fixtures(ctx):
                 <div></div>
                 <div>AWAY</div>
                 <div style="text-align:center;">AI SCORE</div>
+                <div style="text-align:center;">AI PRED</div>
                 <div style="text-align:center;">REAL</div>
                 <div style="text-align:center;">WINNER</div>
                 <div style="text-align:center;">SCORE</div>
@@ -695,6 +701,21 @@ def page_fixtures(ctx):
             hc = "#38BDF8" if h_prob == max_p else "rgba(148,187,233,0.35)"
             dc = "#F59E0B" if d_prob == max_p else "rgba(148,187,233,0.35)"
             ac = "#A78BFA" if a_prob == max_p else "rgba(148,187,233,0.35)"
+
+            # AI PRED cell
+            if h_prob == max_p:
+                pred_label = m["home"].split()[-1]
+                pred_pct   = h_prob
+                pred_color = "#38BDF8"
+            elif d_prob == max_p:
+                pred_label = "Draw"
+                pred_pct   = d_prob
+                pred_color = "#F59E0B"
+            else:
+                pred_label = m["away"].split()[-1]
+                pred_pct   = a_prob
+                pred_color = "#A78BFA"
+
             st.markdown(f"""
             <div class="hst-row" style="border-color:rgba(56,189,248,0.15);">
                 <div class="hst-date-col">
@@ -711,18 +732,22 @@ def page_fixtures(ctx):
                     <span class="hst-name">{m["away"]}</span>
                 </div>
                 <div class="hst-score-pred">{pred_score}</div>
+                <div style="text-align:center;line-height:1.2">
+                    <div style="font-family:Rajdhani,sans-serif;font-size:0.82rem;font-weight:700;color:{pred_color};">{pred_label}</div>
+                    <div style="font-family:Rajdhani,sans-serif;font-size:0.68rem;color:rgba(148,187,233,0.4);">{pred_pct}%</div>
+                </div>
                 <div class="hst-score-real">
                     <span style="font-family:'Rajdhani',sans-serif;font-size:0.65rem;color:rgba(148,187,233,0.3);letter-spacing:1px;">TBD</span>
                 </div>
                 <div class="hst-badge-wrap">
                     <span class="hst-badge hst-upcoming">⏳ Upcoming</span>
                 </div>
-                <div class="hst-badge-wrap">
-                    <span style="font-family:'Rajdhani',sans-serif;font-size:0.7rem;color:rgba(148,187,233,0.3);">
-                        <span style="color:{hc};">{h_prob}%</span> /
-                        <span style="color:{dc};">{d_prob}%</span> /
-                        <span style="color:{ac};">{a_prob}%</span>
-                    </span>
+                <div style="text-align:center;font-family:Rajdhani,sans-serif;font-size:0.72rem;">
+                    <span style="color:{hc};">{h_prob}%</span>
+                    <span style="color:rgba(148,187,233,0.2);"> / </span>
+                    <span style="color:{dc};">{d_prob}%</span>
+                    <span style="color:rgba(148,187,233,0.2);"> / </span>
+                    <span style="color:{ac};">{a_prob}%</span>
                 </div>
             </div>""", unsafe_allow_html=True)
 
@@ -756,6 +781,35 @@ def page_fixtures(ctx):
                 row_accent = "rgba(255,255,255,0.05)"
                 real_cell  = '<span style="color:rgba(148,187,233,0.2);">—</span>'
 
+            # ── AI PRED cell — แสดงว่า AI ทายใครชนะ + % ──
+            pw  = e.get("pred_winner")
+            hp  = e.get("h_prob")
+            dp  = e.get("d_prob")
+            ap  = e.get("a_prob")
+            if pw and hp is not None:
+                if pw == "Home":
+                    pred_label = e["home"].split()[-1]   # ชื่อทีมสั้น
+                    pred_pct   = hp
+                    pred_color = "#38BDF8"
+                elif pw == "Draw":
+                    pred_label = "Draw"
+                    pred_pct   = dp
+                    pred_color = "#F59E0B"
+                else:
+                    pred_label = e["away"].split()[-1]
+                    pred_pct   = ap
+                    pred_color = "#A78BFA"
+                ai_pred_cell = (
+                    f'<div style="text-align:center;line-height:1.2">'
+                    f'<div style="font-family:Rajdhani,sans-serif;font-size:0.82rem;'
+                    f'font-weight:700;color:{pred_color};">{pred_label}</div>'
+                    f'<div style="font-family:Rajdhani,sans-serif;font-size:0.68rem;'
+                    f'color:rgba(148,187,233,0.4);">{pred_pct}%</div>'
+                    f'</div>'
+                )
+            else:
+                ai_pred_cell = '<div style="text-align:center;color:rgba(148,187,233,0.2);">—</div>'
+
             st.markdown(f"""
             <div class="hst-row" style="border-color:{row_accent};">
                 <div class="hst-date-col">
@@ -772,6 +826,7 @@ def page_fixtures(ctx):
                     <span class="hst-name">{e["away"]}</span>
                 </div>
                 <div class="hst-score-pred">{e.get("pred_score","—")}</div>
+                {ai_pred_cell}
                 <div class="hst-score-real" style="text-align:center;">{real_cell}</div>
                 <div class="hst-badge-wrap">{w_badge}</div>
                 <div class="hst-badge-wrap">{s_badge}</div>
