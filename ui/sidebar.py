@@ -252,7 +252,8 @@ def render_sidebar(ctx=None):
             "Predict Match": "  Predict Match",
             "Next Fixtures": "  Next Fixtures",
             "Season Table":  "  Season Table",
-            "Analysis":      "  Analysis",
+            "Docs":          "  Docs",
+            "Model Test":    "  Model Testing",
             "Update Data":   "  Update Data",
         }
 

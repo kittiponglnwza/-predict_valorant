@@ -30,6 +30,8 @@ _IDS = {
     "Man United":66,"Manchester United":66,
     "Newcastle":67,"Newcastle United":67,
     "Nottm Forest":351,"Nottingham Forest":351,
+    "Nott'm Forest":351,"Nott\u2019m Forest":351,"Nott.m Forest":351,
+    "Nott Forest":351,"Notts Forest":351,"Forest":351,
     "Southampton":340,"Spurs":73,"Tottenham":73,"Tottenham Hotspur":73,
     "West Ham":563,"West Ham United":563,
     "Wolves":76,"Wolverhampton":76,"Wolverhampton Wanderers":76,

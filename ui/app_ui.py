@@ -28,6 +28,8 @@ from page_fixtures  import page_fixtures
 from page_season    import page_season
 from page_analysis  import page_analysis
 from page_update    import page_update
+from page_docs       import page_docs
+from page_model_test import page_model_test
 
 STABILIZE_REPORT_PATH = Path(_ROOT) / "artifacts" / "reports" / "stabilize_backtest_report.json"
 
@@ -281,8 +283,10 @@ pages = {
     "Predict Match": page_predict,
     "Next Fixtures": page_fixtures,
     "Season Table":  page_season,
-    "Analysis":      page_analysis,
+    
     "Update Data":   page_update,
+    "Docs":          page_docs,
+    "Model Test":    page_model_test,
 }
 
 active_page = st.session_state.get('nav_page', "Overview")
