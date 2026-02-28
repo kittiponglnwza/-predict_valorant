@@ -31,7 +31,8 @@ def build_stabilize_model(draw_weight: float = 1.0, engine: str = "auto"):
             min_child_samples=30, # เพิ่ม regularization
             reg_alpha=0.1,        # L1
             reg_lambda=1.0,       # L2
-            class_weight={0: 1.0, 1: float(draw_weight), 2: 1.0},
+            # [STEP 2+3] away=1.25 ลด Home bias
+            class_weight={0: 1.25, 1: float(draw_weight), 2: 1.0},
             random_state=42,
             n_jobs=-1,
             verbose=-1,
@@ -48,7 +49,8 @@ def build_stabilize_model(draw_weight: float = 1.0, engine: str = "auto"):
             random_seed=42,
             verbose=False,
             allow_writing_files=False,
-            class_weights=[1.0, float(draw_weight), 1.0],
+            # [STEP 2+3] away=1.25 ลด Home bias
+            class_weights=[1.25, float(draw_weight), 1.0],
         )
 
     return GradientBoostingClassifier(
@@ -382,9 +384,9 @@ def _blend_probabilities(proba_by_source: dict[str, np.ndarray], weights: dict[s
 
 
 def _default_min_recall(selection_metric: str) -> dict[int, float]:
-    # [PATCH-6] เพิ่ม min_recall ทุก class เพื่อป้องกัน class collapse ที่ทำให้ acc ตก
-    # ต้องการให้โมเดลจับทุก class ได้พอสมควร ไม่ใช่แค่ bet ทุกอย่างเป็น Away/Home
-    return {0: 0.20, 1: 0.15, 2: 0.25}
+    # [STEP 2+FIX] away=0.25 บังคับจับ Away, draw=0.08 ป้องกัน zero-draw collapse
+    # home=0.25 คุมไม่ให้ over-predict Home
+    return {0: 0.25, 1: 0.08, 2: 0.25}
 
 
 def run_baseline_fold(
@@ -425,8 +427,8 @@ def tune_fold_on_val(
     features,
     target_col: str = "Result3",
     labels: tuple[int, ...] = (0, 1, 2),
-    # [PATCH-2] ลด draw_weight candidates — ค่าสูงเกินทำให้ acc ตกใน holdout
-    draw_weight_candidates: tuple[float, ...] = (1.0, 1.5, 2.0, 2.5, 3.0),
+    # [STEP 3] cap draw_weight ≤ 1.4 — ป้องกัน overfit draw
+    draw_weight_candidates: tuple[float, ...] = (1.0, 1.2, 1.4),
     use_sigmoid_options: tuple[bool, ...] = (True, False),
     selection_metric: str = "macro_f1",
     min_recall: dict[int, float] | None = None,
@@ -455,9 +457,11 @@ def tune_fold_on_val(
                 t_home, t_draw, tuned_primary = optimize_thresholds(
                     proba=proba,
                     y_true=y_eval,
-                    # [PATCH-3] เปลี่ยน objective เป็น accuracy เพื่อดัน acc ขึ้น
+                    # [STEP 4+FIX] t_draw floor=0.26 — 0.30 สูงเกินทำให้ draw_recall=0
+                    # draw_weight ที่ลดลง (≤1.4) ทำให้ draw proba อยู่แถว 0.25-0.30
+                    # ต้องให้ floor ต่ำพอที่ optimizer จะหา threshold จริงได้
                     t_home_range=(0.35, 0.60),
-                    t_draw_range=(0.20, 0.40),
+                    t_draw_range=(0.26, 0.40),
                     min_recall=recall_constraints,
                     objective="accuracy",
                 )

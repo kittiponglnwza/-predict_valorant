@@ -35,6 +35,15 @@ MIN_RECALL_POLICY = {
 }
 RECOMMENDED_MIN_SEASONS = int(os.getenv("MIN_RECOMMENDED_SEASONS", "8"))
 
+# ─── [STEP 3] Class weight constants ────────────────────────────────────────
+# ส่งไปที่ trainer.py ผ่าน env หรือ import โดยตรง
+# home_weight=1.0, draw_weight=1.4, away_weight=1.25
+# ตั้งไว้ที่นี่เพื่อ reference — trainer.py ต้องใช้ค่าเหล่านี้ด้วย
+CLASS_WEIGHT_HOME = float(os.getenv("CLASS_WEIGHT_HOME", "1.0"))
+CLASS_WEIGHT_DRAW = float(os.getenv("CLASS_WEIGHT_DRAW", "1.4"))
+CLASS_WEIGHT_AWAY = float(os.getenv("CLASS_WEIGHT_AWAY", "1.25"))
+# ────────────────────────────────────────────────────────────────────────────
+
 
 def _metric_delta(after: float, before: float) -> float:
     return float(after - before)
@@ -176,11 +185,13 @@ def _build_global_thresholds(
 
     proba_all = np.vstack(pooled_proba)
     y_all = np.concatenate(pooled_true)
+
+    # [STEP 4+FIX] t_draw floor=0.26 สอดคล้องกับ tune_fold — ป้องกัน draw_recall=0
     t_home, t_draw, tuned_score = optimize_thresholds(
         proba_all,
         y_all,
-        t_home_range=(0.30, 0.65),
-        t_draw_range=(0.08, 0.35),
+        t_home_range=(0.32, 0.65),   # home floor=0.32
+        t_draw_range=(0.26, 0.40),   # draw floor=0.26 (ลดจาก 0.30 ที่ทำ draw=0)
         min_recall=min_recall,
         objective=selection_metric,
     )
@@ -423,21 +434,20 @@ def main():
 
     profiles: dict[str, dict] = {}
 
-    print("\n--- Profile: no_market ---")
-    feat_no_market = _run_feature_pipeline_for_mode(use_market_features=False)
-    profiles["no_market"] = _run_profile(feat_no_market, profile_name="no_market")
-
+    # [STEP 1] บังคับ with_market — ไม่รัน no_market อีกต่อไป
+    # ถ้า with_market ไม่มี odds → fallback no_market อัตโนมัติ
     print("\n--- Profile: with_market ---")
     feat_with_market = _run_feature_pipeline_for_mode(use_market_features=True)
     if _is_market_profile_usable(feat_with_market):
         profiles["with_market"] = _run_profile(feat_with_market, profile_name="with_market")
+        selected_name = "with_market"
+        print(f"\n[Profile selection] Forced with_market (STEP 1)")
     else:
-        print("Market profile skipped: odds columns/features unavailable.")
+        print("Market features unavailable → fallback to no_market")
+        feat_no_market = _run_feature_pipeline_for_mode(use_market_features=False)
+        profiles["no_market"] = _run_profile(feat_no_market, profile_name="no_market")
+        selected_name = "no_market"
 
-    selected_name = max(
-        profiles.keys(),
-        key=lambda name: float(profiles[name]["summary"]["avg_val_macro_f1_after"]),
-    )
     selected = profiles[selected_name]
 
     profile_comparison = {}
@@ -473,4 +483,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
