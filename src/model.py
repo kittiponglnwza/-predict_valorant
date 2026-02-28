@@ -665,7 +665,7 @@ def run_training_pipeline(match_df_clean, FEATURES, home_stats, away_stats,
         'poisson_model_away':   away_poisson_model if POISSON_MODEL_READY else None,
         'poisson_scaler':       poisson_scaler if POISSON_MODEL_READY else None,
         'poisson_features':     poisson_features_used if POISSON_MODEL_READY else [],
-        'version':              '9.2',
+        'version':              '9.3',
     }
     save_model(model_bundle)
 

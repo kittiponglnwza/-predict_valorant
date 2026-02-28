@@ -63,6 +63,19 @@ def _bind_stabilize_to_ctx(ctx):
     return ctx
 
 
+def _apply_stabilize_thresholds(ctx):
+    report = _load_stabilize_report()
+    if not report:
+        return ctx
+    cfg = report.get('selected_settings', {}).get('global_from_validation', {})
+    t_home = cfg.get('t_home')
+    t_draw = cfg.get('t_draw')
+    if t_home is not None and t_draw is not None:
+        ctx['OPT_T_HOME'] = float(t_home)
+        ctx['OPT_T_DRAW'] = float(t_draw)
+    return ctx
+
+
 def _ensure_runtime_prediction_consistency(ctx):
     """
     Keep UI metrics tied to runtime model thresholds only.
@@ -112,7 +125,7 @@ def load_or_train():
     try:
         bundle = load_model()
         bundle_version = float(bundle.get('version', 0))
-        if bundle_version < 9.2 or ('mlp2_blend_weight' not in bundle):
+        if bundle_version < 9.3 or ('mlp2_blend_weight' not in bundle):
             raise ValueError("Model bundle is outdated, retraining required.")
         ctx = _ctx_from_bundle(feat, bundle)
     except Exception:
@@ -240,6 +253,7 @@ if 'ctx' not in st.session_state:
 
 ctx = st.session_state['ctx']
 ctx = _bind_stabilize_to_ctx(ctx)
+ctx = _apply_stabilize_thresholds(ctx)
 ctx = _ensure_runtime_prediction_consistency(ctx)
 st.session_state['ctx'] = ctx
 
